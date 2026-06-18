@@ -644,6 +644,154 @@ def test_retrieval_quality_metrics():
 
 ---
 
+## 1.11 Advanced RAG vs. Naive RAG: A Deep Comparison
+
+The difference between naive and advanced RAG is not incremental — it is transformational. Understanding this difference justifies the additional engineering investment.
+
+### 1.11.1 Naive RAG Limitations
+
+Naive RAG makes several assumptions that fail in production:
+
+1. **The query is well-formed.** Users often ask vague, ambiguous, or incomplete questions. "Tell me about the contract" is not specific enough for effective retrieval.
+
+2. **The embedding model captures all relevance.** Dense retrieval misses exact terms, numerical references, and domain-specific jargon.
+
+3. **All retrieved chunks are equally useful.** Without reranking, the LLM sees a mix of relevant and irrelevant content.
+
+4. **The LLM can handle raw retrieved text.** Without formatting or compression, the context may be noisy or poorly structured.
+
+### 1.11.2 Advanced RAG Improvements
+
+Advanced RAG addresses each limitation:
+
+| Naive RAG Assumption | Advanced RAG Solution | Quality Impact |
+|---------------------|----------------------|----------------|
+| Well-formed query | Query rewriting, expansion | +10-20% recall |
+| Dense retrieval captures all | Hybrid search (dense + sparse) | +15-30% precision |
+| All chunks equally useful | Reranking with cross-encoder | +15-25% precision |
+| Raw text is fine | Context compression, formatting | +5-10% faithfulness |
+
+### 1.11.3 The Investment Required
+
+Advanced RAG requires additional infrastructure:
+
+| Component | Naive RAG | Advanced RAG | Additional Cost |
+|-----------|----------|--------------|-----------------|
+| Query rewriting | None | LLM call | $0.001/query |
+| Hybrid search | Vector only | BM25 + vector | Negligible |
+| Reranking | None | Cross-encoder | $0.001/query |
+| Context compression | None | LLM call | $0.0005/query |
+| **Total additional** | | | **$0.0025/query** |
+
+At 10,000 queries/day, the additional cost is $750/month. The quality improvement typically justifies this investment within the first month of production.
+
+---
+
+## 1.12 The Embedding Model Decision
+
+The embedding model is the foundation of retrieval quality. Choosing the right model requires benchmarking on your specific data.
+
+### 1.12.1 Benchmarking Methodology
+
+1. **Create a golden dataset**: 500+ query-document pairs with relevance labels.
+2. **Embed all documents**: Run each candidate embedding model on your document collection.
+3. **Embed all queries**: Run each candidate embedding model on your query set.
+4. **Evaluate retrieval quality**: Compute Precision@5, Recall@5, MRR, and NDCG for each model.
+5. **Measure latency and cost**: The best model is useless if it is too slow or expensive.
+
+### 1.12.2 Common Pitfalls
+
+| Pitfall | Description | Consequence |
+|---------|-------------|-------------|
+| **MTEB-only evaluation** | Using public benchmarks without domain testing | Domain mismatch |
+| **Ignoring latency** | Choosing the largest model without latency testing | SLA violations |
+| **Ignoring cost** | Choosing the most expensive model without cost analysis | Budget overruns |
+| **Single-model testing** | Not comparing against alternatives | Missed optimizations |
+| **Ignoring document length** | Using a model with short context for long documents | Truncated embeddings |
+
+---
+
+## 1.13 The Vector Database Decision
+
+The vector database stores embeddings and supports similarity search. The choice of vector database affects scalability, cost, and features.
+
+### 1.13.1 Selection Criteria
+
+| Criterion | Why It Matters | How to Evaluate |
+|-----------|---------------|-----------------|
+| **Hybrid search support** | Dense + sparse retrieval is the production standard | Test BM25 + vector search in same system |
+| **Multi-tenancy** | Enterprise requirement for data isolation | Test tenant-level data isolation |
+| **Scalability** | Must handle your document collection size | Test with 10x your expected load |
+| **Filtering** | Metadata filtering for access control | Test complex filter combinations |
+| **Cost model** | Must fit your budget | Calculate cost at your expected scale |
+| **Operational overhead** | Managed vs. self-hosted | Evaluate team capacity for operations |
+
+### 1.13.2 Decision Matrix
+
+| Requirement | Weaviate | Pinecone | Qdrant | pgvector | Elasticsearch |
+|------------|----------|----------|--------|----------|---------------|
+| Hybrid search | Native | No | No | No | Native |
+| Multi-tenancy | Class-level | Namespace | Collection | Row-level | Index-level |
+| Managed option | Yes | Yes | Yes | Yes | Yes |
+| Self-hosted | Yes | No | Yes | Yes | Yes |
+| Maximum scale | 100M+ vectors | 100M+ vectors | 100M+ vectors | 10M vectors | 100M+ vectors |
+| Best for | Hybrid, multi-tenant | Serverless, simple | Performance, flexibility | PostgreSQL shops | Production hybrid |
+
+---
+
+## 1.14 The Reranking Decision
+
+Reranking re-scores initial retrieval results using a more accurate but slower model. It is the highest-ROI improvement in most RAG systems.
+
+### 1.14.1 When to Rerank
+
+| Scenario | Rerank? | Rationale |
+|----------|---------|-----------|
+| High precision required | Yes | Cross-encoder accuracy justifies latency |
+| Cost-sensitive | Selective | Rerank only low-confidence queries |
+| Latency-sensitive | Selective | Rerank top-K only, not all candidates |
+| Simple queries | Optional | Initial retrieval may be sufficient |
+| Complex queries | Yes | Reranking disambiguates results |
+
+### 1.14.2 Reranking Model Selection
+
+| Model | Accuracy | Latency | Cost | Best For |
+|-------|----------|---------|------|----------|
+| Cohere Rerank v3 | High | Fast | $0.001/query | Enterprise, legal text |
+| BGE-reranker-v2-m3 | High | Medium | Self-hosted | Open source |
+| Cross-encoder/ms-marco-MiniLM | Medium | Fast | Self-hosted | Prototyping |
+| LLM-based reranking | Very High | Slow | $0.005/query | Maximum quality |
+
+---
+
+## 1.15 Key Takeaways (Expanded)
+
+1. **RAG combines parametric reasoning with non-parametric knowledge.** The model provides reasoning; retrieval provides facts. This separation of concerns is the foundational insight behind RAG.
+
+2. **RAG quality is a pipeline problem, not a component problem.** No single component determines overall quality. The pipeline's quality is bounded by its weakest stage.
+
+3. **Hybrid search (dense + sparse) is the production standard.** Dense captures meaning; sparse captures exact terms. Always combine them.
+
+4. **Reranking is the highest-ROI investment in retrieval quality.** A cross-encoder reranker typically improves precision by 15-25% for minimal latency cost.
+
+5. **Chunking strategy is the most impactful early decision.** It determines what information is available for retrieval. Test with your actual data.
+
+6. **Measure retrieval quality independently from generation quality.** Bad retrieval = bad answers. Diagnose retrieval problems before blaming the LLM.
+
+7. **Enterprise RAG requires access control, audit trails, and freshness management.** These are architectural constraints, not afterthoughts.
+
+8. **RAG is the right default for grounding LLMs.** Fine-tune only when you have quantified evidence that RAG plus prompt engineering is insufficient.
+
+9. **Cost management is quality management.** The LLM generation cost dominates total RAG cost. Context window management impacts both quality and cost.
+
+10. **The retrieval-generation boundary is where most quality problems live.** When answers are wrong, ask: "Did retrieval find the right documents?" first.
+
+11. **Advanced RAG is not optional for production.** The 2-3x cost increase over naive RAG is justified by 20-40% quality improvement.
+
+12. **Benchmark embedding models on your data.** Public benchmarks (MTEB) do not reflect domain-specific retrieval quality. Always test on your actual documents and queries.
+
+---
+
 ## 1.11 Further Reading
 
 - **"Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks" by Lewis et al. (2020)** — The original RAG paper. Essential for understanding the theoretical foundation.

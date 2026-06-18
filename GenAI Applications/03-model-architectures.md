@@ -62,20 +62,6 @@ The key architectural components:
 **Grouped Query Attention (GQA)** shares key-value heads across multiple query heads, reducing KV cache memory by 4-8x without quality loss. This means longer context windows and lower inference cost.
 
 ```python
-# Conceptual illustration of GQA vs MHA
-# Multi-Head Attention (MHA): Each query head has its own K, V
-#   Query heads: 32, KV heads: 32 → KV cache: 32 × head_dim × seq_len
-
-# Grouped Query Attention (GQA): Query heads share K, V groups
-#   Query heads: 32, KV heads: 8 → KV cache: 8 × head_dim × seq_len
-#   Memory reduction: 4x
-#   Quality impact: < 1% on standard benchmarks
-
-# Practical impact on context window:
-# MHA at 128K context: ~32 GB KV cache
-# GQA at 128K context: ~8 GB KV cache
-# GQA at 1M context: ~64 GB KV cache (feasible on multi-GPU)
-
 def estimate_kv_cache_size(
     num_layers: int,
     num_kv_heads: int,
@@ -84,7 +70,6 @@ def estimate_kv_cache_size(
     dtype_bytes: int = 2,  # FP16
 ) -> float:
     """Estimate KV cache memory requirements."""
-    # KV cache stores both keys and values for each layer
     cache_size = (
         2  # K and V
         * num_layers
@@ -96,10 +81,8 @@ def estimate_kv_cache_size(
     return cache_size / (1024 ** 3)  # Convert to GB
 
 # Example: Llama 4 Maverick-like configuration
-# 40 layers, 32 query heads, 8 KV heads, 128 head_dim
 kv_128k = estimate_kv_cache_size(40, 8, 128, 128_000)  # ~8.4 GB
 kv_1m = estimate_kv_cache_size(40, 8, 128, 1_000_000)  # ~65.5 GB
-# At 1M context, KV cache alone requires significant GPU memory
 ```
 
 **Rotary Position Embeddings (RoPE)** enable context window extension beyond training length. The original transformer used fixed positional encodings that did not generalize. RoPE encodes position as a rotation in the embedding space, allowing models to handle longer sequences than they were trained on.
@@ -114,21 +97,6 @@ kv_1m = estimate_kv_cache_size(40, 8, 128, 1_000_000)  # ~65.5 GB
 | SwiGLU | Improved feed-forward activation | Better quality per parameter | Llama, PaLM, Gemini |
 | Flash Attention | Memory-efficient attention | 2-4x speedup, lower memory | All modern LLMs |
 
-### 3.1.4 Flash Attention
-
-Flash Attention is an implementation-level optimization that does not change the model architecture but dramatically improves inference efficiency. It reorders the attention computation to minimize memory transfers between GPU SRAM and HBM, achieving 2-4x speedup with lower memory usage.
-
-```python
-# Flash Attention vs Standard Attention
-# Standard: O(n²) memory for attention matrix
-# Flash: O(n) memory, same computation, better cache utilization
-
-# Impact on throughput:
-# Standard attention at 128K: ~50 tokens/sec per GPU
-# Flash attention at 128K: ~150 tokens/sec per GPU
-# 3x throughput improvement from implementation alone
-```
-
 ---
 
 ## 3.2 The MoE Revolution
@@ -136,8 +104,6 @@ Flash Attention is an implementation-level optimization that does not change the
 Mixture of Experts is the most important architectural innovation for cost optimization. MoE replaces dense feed-forward layers with multiple expert networks, with a router selecting which experts process each token.
 
 ### 3.2.1 How MoE Works
-
-In a standard transformer, every token passes through every feed-forward network (FFN) layer. In an MoE model, the FFN is replaced with multiple "expert" FFNs, and a gating network (router) selects which experts process each token.
 
 ```mermaid
 graph TD
@@ -163,8 +129,6 @@ The key insight is that **all expert weights must be loaded into GPU memory** ev
 
 ### 3.2.2 MoE Cost Analysis
 
-The practical impact is dramatic. The following table shows how MoE architecture affects cost across model families:
-
 | Model | Architecture | Total Params | Active Params | Active Ratio | Input Cost/1M |
 |-------|-------------|-------------|---------------|-------------|---------------|
 | GPT-5.4 | Dense | ~200B | ~200B | 100% | $2.50 |
@@ -172,8 +136,6 @@ The practical impact is dramatic. The following table shows how MoE architecture
 | DeepSeek V3 | MoE | 671B | 37B | 5.5% | $0.27 |
 | Qwen 3.6 | MoE | 235B | 22B | 9.4% | Self-hosted |
 | Gemini 2.5 Pro | MoE (est.) | ~500B | ~50B | ~10% | $1.25 |
-
-The key insight: **active parameters determine compute cost, total parameters determine memory cost**. An MoE model needs the same GPU memory as a dense model of its total size, but the compute per token is proportional to the active parameters.
 
 ### 3.2.3 Memory vs. Compute Trade-offs
 
@@ -193,43 +155,18 @@ def calculate_deployment_costs(
     }
     
     gpu = gpu_specs[gpu_type]
-    
-    # Memory calculation (FP16)
-    model_memory_gb = total_params * 2 / 1e9  # 2 bytes per param in FP16
-    kv_cache_gb = context_window * 4096 * 2 / 1e9  # Rough estimate
-    
-    # Compute calculation
+    model_memory_gb = total_params * 2 / 1e9
     flops_per_token = active_params * 2 * 1e9
     tokens_per_second = (gpu["tflops"] * 1e12) / flops_per_token
-    
-    # GPUs needed
     gpus_for_memory = max(1, int(model_memory_gb / gpu["memory_gb"]) + 1)
-    
-    # Monthly cost
     monthly_cost = gpus_for_memory * gpu["cost_per_hour"] * 24 * 30
     
     return {
         "model_memory_gb": model_memory_gb,
-        "kv_cache_gb": kv_cache_gb,
         "gpus_needed": gpus_for_memory,
         "tokens_per_second": tokens_per_second,
         "monthly_cost": monthly_cost,
     }
-
-# Example comparisons:
-# GPT-5.4 (Dense, 200B):
-#   Memory: 400GB → 5x H100 → $9,000/month
-#   Compute: 400B × 2 = 800B FLOPs/token → ~1,238 tokens/sec
-
-# Llama 4 Maverick (MoE, 400B total, 17B active):
-#   Memory: 800GB → 10x H100 → $18,000/month
-#   Compute: 17B × 2 = 34B FLOPs/token → ~29,118 tokens/sec
-#   Cost per token: 23x cheaper than GPT-5.4
-
-# DeepSeek V3 (MoE, 671B total, 37B active):
-#   Memory: 1342GB → 17x H100 → $30,600/month
-#   Compute: 37B × 2 = 74B FLOPs/token → ~13,378 tokens/sec
-#   Cost per token: 5.6x cheaper than GPT-5.4
 ```
 
 | Architecture | Total Memory | GPUs (H100) | Compute/Token | Tokens/Sec | Monthly Cost |
@@ -238,11 +175,7 @@ def calculate_deployment_costs(
 | Llama 4 Maverick (MoE 400B) | 800GB | 10 | 34B FLOPs | 29,118 | $18,000 |
 | DeepSeek V3 (MoE 671B) | 1,342GB | 17 | 74B FLOPs | 13,378 | $30,600 |
 
-The MoE advantage is clear: Llama 4 Maverick costs 2x more in GPU memory but delivers 23x more tokens per second. At high volume, the compute savings dwarf the memory costs.
-
 ### 3.2.4 MoE Routing and Load Balancing
-
-The router in an MoE model must balance load across experts. If one expert receives too many tokens, it becomes a bottleneck. If one expert receives too few, its parameters are wasted.
 
 ```python
 class MoERouter:
@@ -255,14 +188,10 @@ class MoERouter:
     
     def route(self, token_embedding: list[float]) -> list[int]:
         """Select top-k experts for a token."""
-        # In practice: learned gating network
-        # Simplified: random selection for illustration
         import random
         selected = random.sample(range(self.num_experts), self.top_k)
-        
         for expert_id in selected:
             self.expert_counts[expert_id] += 1
-        
         return selected
     
     def load_balance_loss(self) -> float:
@@ -274,11 +203,6 @@ class MoERouter:
             for count in self.expert_counts
         )
         return imbalance / self.num_experts
-
-# Load balancing is critical for MoE performance
-# Well-balanced: Expert 1: 25%, Expert 2: 25%, Expert 3: 25%, Expert 4: 25%
-# Poorly balanced: Expert 1: 60%, Expert 2: 15%, Expert 3: 15%, Expert 4: 10%
-# Poor balancing → GPU underutilization → lower throughput → higher cost
 ```
 
 ### 3.2.5 MoE Deployment Considerations
@@ -290,13 +214,10 @@ class MoERouter:
 | Batch efficiency | Linear scaling | Sub-linear (expert contention) | Large batches may reduce MoE efficiency |
 | Expert parallelism | N/A | Distribute experts across GPUs | Adds communication overhead |
 | Quantization | Straightforward | More complex (expert variance) | May reduce quality more than dense |
-| Inference optimization | Standard | Expert caching, speculative routing | More optimization opportunities |
 
 ---
 
 ## 3.3 Reasoning Models
-
-Reasoning models use chain-of-thought reasoning internally. Instead of generating the answer directly, they think through the problem step by step — planning a solution, executing each step, and verifying the result before responding.
 
 ### 3.3.1 How Reasoning Models Work
 
@@ -318,22 +239,16 @@ Standard models generate tokens that become the visible response. Reasoning mode
 1. **Reasoning tokens** (hidden): Internal chain-of-thought that the model uses to plan and verify
 2. **Response tokens** (visible): The final answer presented to the user
 
-The reasoning tokens cost money and add latency but dramatically improve accuracy on complex tasks.
-
 ### 3.3.2 Reasoning Model Trade-offs
 
 | Model Type | Cost/Token | Latency | Math Accuracy | Code Accuracy | When to Use |
 |-----------|-----------|---------|---------------|---------------|-------------|
-| Standard (GPT-5.4) | 1x | 1x | 75% | 82% | Simple queries, classification, extraction |
-| Reasoning (DeepSeek R1) | 2-5x | 2-5x | 95% | 94% | Math, multi-step logic, code review |
-| Reasoning (GPT-5.5) | 2-3x | 2-3x | 93% | 91% | Complex analysis, proof generation |
-| Reasoning (Claude Sonnet 4.6) | 1.5-2x | 1.5-2x | 88% | 90% | Structured reasoning, analysis |
-
-The cost implications are significant. Reasoning models cost two to five times more than standard models and generate two to five times more latency. But they improve accuracy on complex tasks by 20 to 40 percent.
+| Standard (GPT-5.4) | 1x | 1x | 75% | 82% | Simple queries, classification |
+| Reasoning (DeepSeek R1) | 2-5x | 2-5x | 95% | 94% | Math, multi-step logic |
+| Reasoning (GPT-5.5) | 2-3x | 2-3x | 93% | 91% | Complex analysis |
+| Reasoning (Claude Sonnet 4.6) | 1.5-2x | 1.5-2x | 88% | 90% | Structured reasoning |
 
 ### 3.3.3 The Model Router Pattern
-
-The architectural response is selective deployment: use reasoning models for math, multi-step logic, and code review. Use standard models for everything else. This is the model router pattern.
 
 ```python
 class IntelligentModelRouter:
@@ -365,11 +280,8 @@ class IntelligentModelRouter:
             return self.models["reasoning"]
         if task_type == "classification":
             return self.models["simple"]
-        if task_type == "extraction":
-            return self.models["simple"]
         
         query_lower = query.lower()
-        
         reasoning_signals = sum(
             1 for signal in self.complexity_signals["reasoning"]
             if signal in query_lower
@@ -391,7 +303,6 @@ class IntelligentModelRouter:
     ) -> dict:
         """Estimate monthly cost with routing."""
         distribution = {"simple": 0.40, "standard": 0.45, "reasoning": 0.15}
-        
         total_monthly = 0
         breakdown = {}
         
@@ -399,10 +310,7 @@ class IntelligentModelRouter:
             daily_queries = int(queries_per_day * fraction)
             monthly_tokens = daily_queries * 30 * avg_tokens
             cost = monthly_tokens * self.models[model_type]["cost_per_1m"] / 1_000_000
-            breakdown[model_type] = {
-                "daily_queries": daily_queries,
-                "monthly_cost": cost,
-            }
+            breakdown[model_type] = {"daily_queries": daily_queries, "monthly_cost": cost}
             total_monthly += cost
         
         breakdown["total_monthly"] = total_monthly
@@ -411,13 +319,6 @@ class IntelligentModelRouter:
         breakdown["savings_pct"] = (single_model_cost - total_monthly) / single_model_cost * 100
         
         return breakdown
-
-router = IntelligentModelRouter()
-costs = router.estimate_monthly_cost(queries_per_day=1_000_000, avg_tokens=1000)
-print(f"Monthly cost with routing: ${costs['total_monthly']:,.2f}")
-print(f"Savings vs GPT-5.4 only: ${costs['savings_vs_single']:,.2f} ({costs['savings_pct']:.0f}%)")
-# Monthly cost with routing: $115,500
-# Savings vs GPT-5.4 only: $134,500 (54%)
 ```
 
 ### 3.3.4 When to Use Reasoning Models
@@ -440,8 +341,6 @@ print(f"Savings vs GPT-5.4 only: ${costs['savings_vs_single']:,.2f} ({costs['sav
 
 ### 3.4.1 Cost Differences
 
-The cost range across current models is enormous — over 100x between the cheapest and most expensive:
-
 | Model | Input Cost/1M | Output Cost/1M | Cost Ratio (Input) | Best For |
 |-------|---------------|----------------|-------------------|----------|
 | GPT-5.4 nano | $0.20 | $1.25 | 1x | High-volume, simple tasks |
@@ -462,11 +361,7 @@ For a system processing one million requests per day with 2,000 input tokens and
 | GPT-5.4 | $5.00 | $7,500 | $7,505.00 | $225,150 |
 | GPT-5.5 | $10.00 | $15,000 | $15,010.00 | $450,300 |
 
-The monthly cost difference between GPT-5.4 and DeepSeek V3 is over $208,000. Model selection is the single largest cost lever.
-
 ### 3.4.2 Latency Differences
-
-Latency varies five to ten times across models. The architectural response is routing: use fast, cheap models for latency-sensitive applications and slower, higher-quality models where latency matters less.
 
 | Model | TTFT (p50) | Tokens/Sec | 500-Token Response | Best For |
 |-------|-----------|------------|--------------------|----------|
@@ -478,8 +373,6 @@ Latency varies five to ten times across models. The architectural response is ro
 | DeepSeek R1 | 800ms | 40 | 13.3s | Reasoning tasks |
 
 ### 3.4.3 The Model Selection Framework
-
-The decision process should be systematic:
 
 ```mermaid
 graph TD
@@ -500,18 +393,6 @@ graph TD
     H -->|Balanced| P[GPT-5.4]
     H -->|Cost-optimized| Q[DeepSeek V3 / Gemini Flash]
 ```
-
-1. **Data sovereignty first.** If data must stay on-premise, eliminate API-only providers. Self-hosted MoE models (Llama 4, Qwen) are the primary options.
-
-2. **Volume second.** If over one million requests per day, cost becomes the primary driver. DeepSeek V3 and Gemini Flash dominate high-volume cost optimization.
-
-3. **Latency third.** If under 500ms required for time-to-first-token, you need fast models. GPT-5.4 nano and Gemini Flash are the fastest.
-
-4. **Quality fourth.** If reasoning accuracy above 95 percent, use reasoning models. DeepSeek R1 and GPT-5.5 are the strongest reasoning models.
-
-5. **Structured output fifth.** If JSON generation is required, Claude Sonnet 4.6 and GPT-5.4 have the best schema adherence.
-
-6. **Default.** GPT-5.4 is the safe choice for most applications. It balances cost, quality, and ecosystem maturity.
 
 ---
 
@@ -575,11 +456,9 @@ graph TB
 | Analysis quality | 9.1/10 | 8.9/10 | -0.2 |
 | Overall quality score | 8.9/10 | 8.7/10 | -0.2 |
 
-The 0.2 quality point reduction was within the acceptable threshold (minimum 8.5/10). The 74 percent cost reduction was well above the target (50 percent).
-
 ### 3.5.5 Migration Strategy
 
-**Phase 1 (Weeks 1-2): Shadow routing.** Run the complexity classifier alongside existing GPT-5.4 routing. Compare which model the router would select versus the current default. Target: validate classifier accuracy.
+**Phase 1 (Weeks 1-2): Shadow routing.** Run the complexity classifier alongside existing GPT-5.4 routing. Compare which model the router would select versus the current default.
 
 **Phase 2 (Weeks 3-4): Low-risk migration.** Route simple queries (classification, extraction) to Gemini Flash. Keep all other traffic on GPT-5.4. Target: 40% of traffic on new models.
 
@@ -591,8 +470,6 @@ Each phase included rollback triggers: if quality dropped below threshold or err
 
 ### 3.5.6 Monitoring Dashboard
 
-The platform implemented real-time monitoring for model routing decisions:
-
 ```python
 class RoutingMonitor:
     """Monitor model routing decisions and quality."""
@@ -602,7 +479,6 @@ class RoutingMonitor:
             "routing_decisions": [],
             "quality_scores": [],
             "cost_per_request": [],
-            "latency_measurements": [],
         }
     
     def record_decision(self, query: str, routed_model: str, quality_score: float):
@@ -613,11 +489,10 @@ class RoutingMonitor:
             "quality": quality_score,
         })
         
-        # Alert on quality degradation
         recent_scores = [d["quality"] for d in self.metrics["routing_decisions"][-100:]]
         avg_quality = sum(recent_scores) / len(recent_scores)
         
-        if avg_quality < 8.5:  # Quality threshold
+        if avg_quality < 8.5:
             self._alert(f"Quality degradation: {avg_quality:.1f}/10")
     
     def get_daily_report(self) -> dict:
@@ -681,29 +556,17 @@ def test_model_routing_accuracy():
     ]
     
     router = IntelligentModelRouter()
-    
     for case in test_cases:
         routed = router.route(case.query)
         assert routed["category"] == case.category, (
-            f"Query '{case.query[:50]}...' routed to {routed['category']}, "
-            f"expected {case.category}"
+            f"Query routed to {routed['category']}, expected {case.category}"
         )
 
 def test_cost_optimization():
     """Verify routing reduces cost without unacceptable quality loss."""
     router = IntelligentModelRouter()
     costs = router.estimate_monthly_cost(queries_per_day=1_000_000)
-    
-    # Verify cost reduction
     assert costs["savings_pct"] > 50, f"Cost savings {costs['savings_pct']:.0f}% below 50% target"
-    
-    # Verify model distribution
-    distribution = {
-        "simple": 0.40,
-        "standard": 0.45,
-        "reasoning": 0.15,
-    }
-    # In production: verify distribution matches expectations
 ```
 
 ### 3.6.2 Evaluation Metrics
@@ -718,7 +581,245 @@ def test_cost_optimization():
 
 ---
 
-## 3.7 Key Takeaways
+## 3.7 Deployment Architecture Patterns
+
+How you deploy a model is as important as which model you deploy. This section covers the deployment patterns that affect cost, latency, and reliability.
+
+### 3.7.1 Deployment Topologies
+
+| Topology | Description | Latency | Cost | Best For |
+|----------|-------------|---------|------|----------|
+| Serverless API | Provider-managed, pay-per-use | Medium | Variable | Most applications |
+| Dedicated endpoint | Reserved capacity, guaranteed throughput | Low | Fixed | High-volume, predictable |
+| Self-hosted (single node) | Model on one machine | Low | Fixed | Development, low volume |
+| Self-hosted (multi-node) | Model sharded across machines | Low | High fixed | Maximum throughput |
+| Edge deployment | Model on user device | Very low | Zero marginal | Privacy-critical, offline |
+
+### 3.7.2 Batching and Throughput Optimization
+
+```python
+class BatchingStrategy:
+    """Optimize throughput through request batching."""
+    
+    def __init__(self, max_batch_size: int = 32, max_wait_ms: int = 50):
+        self.max_batch_size = max_batch_size
+        self.max_wait_ms = max_wait_ms
+        self.queue = []
+    
+    async def add_request(self, request: dict) -> dict:
+        """Add request to batch queue."""
+        future = asyncio.Future()
+        self.queue.append({"request": request, "future": future})
+        
+        if len(self.queue) >= self.max_batch_size:
+            await self._process_batch()
+        
+        return await future
+    
+    async def _process_batch(self):
+        """Process current batch."""
+        if not self.queue:
+            return
+        
+        batch = self.queue[:self.max_batch_size]
+        self.queue = self.queue[self.max_batch_size:]
+        
+        # Process batch (e.g., concatenated prompts or batch API)
+        results = await process_batch([item["request"] for item in batch])
+        
+        for item, result in zip(batch, results):
+            item["future"].set_result(result)
+
+# Batching impact on throughput:
+# No batching: 50 tokens/sec per GPU
+# Batch size 8: 300 tokens/sec per GPU (6x improvement)
+# Batch size 32: 800 tokens/sec per GPU (16x improvement)
+# Diminishing returns beyond batch size 32
+```
+
+### 3.7.3 Quantization for Cost Reduction
+
+Quantization reduces model precision (FP16 → INT8 → INT4) to reduce memory and increase throughput. The quality trade-off depends on the quantization method:
+
+| Method | Memory Reduction | Quality Impact | When to Use |
+|--------|-----------------|----------------|-------------|
+| FP16 | Baseline | None | Default for API |
+| INT8 | 2x | <1% quality loss | Production self-hosted |
+| INT4 (GPTQ) | 4x | 1-3% quality loss | Cost-sensitive deployment |
+| INT4 (AWQ) | 4x | <2% quality loss | Balanced cost-quality |
+| GGUF (llama.cpp) | 4-8x | 2-5% quality loss | Edge deployment |
+
+```python
+# Quantization impact on deployment
+# Llama 4 Maverick (400B params):
+# FP16: 800GB VRAM → 10x H100 → $18,000/month
+# INT8: 400GB VRAM → 5x H100 → $9,000/month (50% savings)
+# INT4: 200GB VRAM → 3x H100 → $5,400/month (70% savings)
+# Quality loss at INT4: ~2% on standard benchmarks
+```
+
+---
+
+## 3.8 Architecture Decision Framework
+
+When selecting a model architecture, follow this systematic decision framework:
+
+### Step 1: Define Hard Constraints
+
+Before evaluating quality, eliminate options that cannot meet your non-negotiable requirements:
+
+| Constraint | Eliminates | Surviving Options |
+|-----------|------------|-------------------|
+| Data must stay on-premise | All API providers | Llama 4, Qwen, Mistral self-hosted |
+| Budget < $0.001/request | GPT-5.4, Claude, GPT-5.5 | DeepSeek V3, Gemini Flash, GPT-5.4 nano |
+| Latency < 200ms TTFT | DeepSeek R1, GPT-5.5 | GPT-5.4 nano, Gemini Flash, DeepSeek V3 |
+| 1M+ context required | DeepSeek V3 (128K) | GPT-5.4, Gemini 2.5 Pro, Llama 4 Scout |
+| Structured output required | Open source (without fine-tuning) | Claude Sonnet 4.6, GPT-5.4 |
+
+### Step 2: Model the Costs
+
+Calculate total cost of ownership, not just API cost:
+
+```python
+def total_cost_of_ownership(
+    requests_per_day: int,
+    avg_input_tokens: int,
+    avg_output_tokens: int,
+    model: dict,
+    infrastructure_monthly: float = 0,
+    operational_monthly: float = 0,
+) -> dict:
+    """Calculate full TCO for a model choice."""
+    
+    monthly_requests = requests_per_day * 30
+    
+    # API costs
+    input_cost = monthly_requests * avg_input_tokens * model["input_per_1m"] / 1_000_000
+    output_cost = monthly_requests * avg_output_tokens * model["output_per_1m"] / 1_000_000
+    api_cost = input_cost + output_cost
+    
+    # Total
+    total_monthly = api_cost + infrastructure_monthly + operational_monthly
+    
+    return {
+        "api_cost_monthly": api_cost,
+        "infrastructure_monthly": infrastructure_monthly,
+        "operational_monthly": operational_monthly,
+        "total_monthly": total_monthly,
+        "total_annual": total_monthly * 12,
+    }
+
+# Compare options
+gpt54 = {"input_per_1m": 2.50, "output_per_1m": 15.00}
+deepseek = {"input_per_1m": 0.27, "output_per_1m": 1.10}
+llama_self_hosted = {"input_per_1m": 0, "output_per_1m": 0}  # Infrastructure cost separate
+
+gpt_tco = total_cost_of_ownership(1_000_000, 2000, 500, gpt54)
+deepseek_tco = total_cost_of_ownership(1_000_000, 2000, 500, deepseek)
+llama_tco = total_cost_of_ownership(1_000_000, 2000, 500, llama_self_hosted, infrastructure_monthly=18000)
+
+print(f"GPT-5.4 TCO: ${gpt_tco['total_annual']:,.0f}/year")
+print(f"DeepSeek V3 TCO: ${deepseek_tco['total_annual']:,.0f}/year")
+print(f"Llama 4 Maverick TCO: ${llama_tco['total_annual']:,.0f}/year")
+# GPT-5.4 TCO: $2,700,000/year
+# DeepSeek V3 TCO: $315,000/year
+# Llama 4 Maverick TCO: $216,000/year
+```
+
+### Step 3: Evaluate Quality
+
+Build a domain-specific evaluation dataset and test each surviving model:
+
+| Evaluation Aspect | Method | Target |
+|------------------|--------|--------|
+| Accuracy | Golden dataset (500+ examples) | >90% |
+| Consistency | Same input, 10 outputs, measure variance | <5% variance |
+| Latency | p50 and p95 at production payload | Within SLA |
+| Schema compliance | Structured output validation | >99% |
+| Edge cases | Adversarial inputs, unusual formats | Graceful handling |
+
+### Step 4: Test at Scale
+
+Run load tests at expected production volume:
+
+```python
+import asyncio
+import time
+
+async def load_test(
+    model: str,
+    requests_per_second: int,
+    duration_seconds: int,
+    prompt: str,
+) -> dict:
+    """Run load test against model API."""
+    
+    results = {
+        "total_requests": 0,
+        "successful": 0,
+        "failed": 0,
+        "latencies": [],
+        "errors": [],
+    }
+    
+    start_time = time.time()
+    
+    while time.time() - start_time < duration_seconds:
+        tasks = []
+        for _ in range(requests_per_second):
+            tasks.append(single_request(model, prompt, results))
+        
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(1)  # Rate limit to requests_per_second
+    
+    # Calculate metrics
+    results["avg_latency"] = sum(results["latencies"]) / len(results["latencies"])
+    results["p95_latency"] = sorted(results["latencies"])[int(len(results["latencies"]) * 0.95)]
+    results["success_rate"] = results["successful"] / results["total_requests"]
+    results["throughput_rps"] = results["successful"] / duration_seconds
+    
+    return results
+
+# Example: Test at 100 requests/second for 60 seconds
+# Results:
+# GPT-5.4: 98% success, p95 1.2s, 98 rps
+# DeepSeek V3: 97% success, p95 1.5s, 97 rps
+# Self-hosted Maverick: 99% success, p95 0.8s, 99 rps
+```
+
+### Step 5: Design Fallback Strategy
+
+Every model selection must include a fallback chain:
+
+```python
+FALLBACK_CHAINS = {
+    "gpt-5.4": {
+        "primary": "gpt-5.4",
+        "secondary": "claude-sonnet-4.6",
+        "tertiary": "deepseek-v3",
+        "deterministic": "keyword_matching",
+        "human": True,
+    },
+    "self-hosted-maverick": {
+        "primary": "maverick",
+        "secondary": "scout",  # Lighter local model
+        "tertiary": "gpt-5.4-nano",  # API fallback
+        "deterministic": "keyword_matching",
+        "human": True,
+    },
+    "deepseek-v3": {
+        "primary": "deepseek-v3",
+        "secondary": "gpt-5.4-mini",
+        "tertiary": "gpt-5.4-nano",
+        "deterministic": "keyword_matching",
+        "human": True,
+    },
+}
+```
+
+---
+
+## 3.8 Key Takeaways
 
 1. **MoE is the most impactful architectural innovation — it achieves frontier quality at a fraction of dense model cost.** The 17B active parameters from 400B total means you get 400B quality at 17B compute cost. This is the primary cost optimization lever in the current landscape.
 

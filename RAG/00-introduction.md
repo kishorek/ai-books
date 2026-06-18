@@ -429,7 +429,179 @@ These constraints are not independent. A regulated industry with high query volu
 
 ---
 
-## 0.12 Key Takeaways
+## 0.12 The RAG Technology Stack
+
+The technology landscape for RAG is vast and evolving rapidly. Understanding the major categories and their trade-offs helps you make informed choices.
+
+### 0.12.1 Embedding Models
+
+| Provider | Model | Dimensions | Max Tokens | Cost/1M Tokens | Best For |
+|----------|-------|-----------|------------|----------------|----------|
+| OpenAI | text-embedding-3-large | 3072 | 8191 | $0.13 | General purpose |
+| OpenAI | text-embedding-3-small | 1536 | 8191 | $0.02 | Cost-sensitive |
+| Cohere | embed-v3 | 1024 | 512 | $0.10 | Enterprise, multilingual |
+| Voyage AI | voyage-3 | 1024 | 32000 | $0.06 | Long documents |
+| Google | text-embedding-004 | 768 | 2048 | $0.025 | Google Cloud native |
+| Self-hosted | BGE-large-en-v1.5 | 1024 | 512 | Compute only | Open source |
+
+The choice of embedding model affects retrieval quality, cost, and latency. Enterprise teams should benchmark 3-5 models on their specific data before choosing.
+
+### 0.12.2 Vector Databases
+
+| Database | Hybrid Search | Multi-Tenancy | Managed Offering | Cost Model |
+|----------|--------------|---------------|-----------------|------------|
+| **Weaviate** | Native BM25 | Class-level | Weaviate Cloud | Per-vector |
+| **Pinecone** | Sparse-dense | Namespace | Pinecone Serverless | Per-query + storage |
+| **Qdrant** | Native | Collection-level | Qdrant Cloud | Per-vector |
+| **Chroma** | No | No | No (self-hosted) | Free (open source) |
+| **Milvus** | Scalar + vector | Partition-level | Zilliz Cloud | Per-query + storage |
+| **Elasticsearch** | BM25 + kNN | Index-level | Elastic Cloud | Per-node |
+| ** pgvector** | No | Row-level (PostgreSQL) | Supabase, Neon | Per-row |
+
+### 0.12.3 Orchestration Frameworks
+
+| Framework | Approach | Strengths | Weaknesses |
+|-----------|----------|-----------|------------|
+| **LangChain** | Chain-based | Large ecosystem, many integrations | Abstraction overhead |
+| **LlamaIndex** | Index-based | Data ingestion focus, simple API | Less flexible orchestration |
+| **LangGraph** | Graph-based | State machines, cycles, human-in-the-loop | Steeper learning curve |
+| **Haystack** | Pipeline-based | Modular, production-ready | Smaller ecosystem |
+| **DSPy** | Programmatic | Optimization-driven, composable | Research-oriented |
+
+### 0.12.4 LLM Providers for RAG
+
+| Provider | Model | Context Window | Input Cost/1M | Output Cost/1M | Best For |
+|----------|-------|---------------|---------------|----------------|----------|
+| OpenAI | GPT-4o | 128K | $2.50 | $10.00 | General purpose |
+| OpenAI | GPT-4o-mini | 128K | $0.15 | $0.60 | Cost-sensitive |
+| Anthropic | Claude 3.5 Sonnet | 200K | $3.00 | $15.00 | Long context |
+| Anthropic | Claude 3 Haiku | 200K | $0.25 | $1.25 | Fast, cheap |
+| Google | Gemini 1.5 Pro | 2M | $1.25 | $5.00 | Very long context |
+| Cohere | Command R+ | 128K | $2.50 | $10.00 | RAG-optimized |
+
+---
+
+## 0.13 Common RAG Failure Modes
+
+Understanding common failure modes helps you design systems that avoid them. The following table catalogs the most frequent RAG failures and their root causes:
+
+| Failure Mode | Symptom | Root Cause | Prevention |
+|-------------|---------|------------|------------|
+| **Retrieval miss** | Model says "I don't know" | Embedding mismatch, chunking errors | Hybrid search, better chunking |
+| **Context noise** | Model gives wrong answer confidently | Large chunks with irrelevant content | Smaller chunks, reranking |
+| **Lost in the middle** | Model ignores relevant middle chunks | LLM position bias | Reorder chunks, compress context |
+| **Hallucination** | Model invents facts not in context | Weak context grounding, poor prompt | Stronger grounding prompts, smaller context |
+| **Contradictory context** | Model gives inconsistent answers | Multiple chunks with conflicting info | Deduplication, source attribution |
+| **Stale answers** | Model gives outdated information | Documents not re-indexed | Incremental re-embedding pipeline |
+| **Access leakage** | User sees unauthorized content | Missing access control | Document-level ACLs at retrieval time |
+| **Cost overrun** | Budget exceeded | Unoptimized context window | Context compression, smaller models |
+| **Latency violation** | Response exceeds SLA | Sequential pipeline, slow reranking | Parallel processing, selective reranking |
+
+The most dangerous failure mode is the silent one: the model confidently generates a wrong answer that sounds plausible. This is why retrieval quality metrics (Precision@K, Recall@K) are more important than generation metrics for diagnosing RAG failures.
+
+---
+
+## 0.14 The Role of Human Oversight
+
+Enterprise RAG systems are not fully autonomous. Human oversight is required at multiple points:
+
+| Oversight Point | What Humans Do | Frequency |
+|----------------|---------------|-----------|
+| **Content curation** | Review and approve documents before ingestion | Ongoing |
+| **Quality evaluation** | Review retrieval and generation quality | Weekly/Monthly |
+| **Query analysis** | Analyze failed queries and improve pipeline | Weekly |
+| **Model evaluation** | Compare model versions and select the best | Monthly/Quarterly |
+| **Exception handling** | Handle edge cases the system cannot | Per-query (low volume) |
+| **Compliance review** | Audit logs, access controls, data governance | Quarterly |
+
+The goal is not to remove humans from the loop — it is to make their involvement efficient and targeted. The system handles 95% of queries autonomously. Humans handle the 5% that require judgment.
+
+---
+
+## 0.15 Design Principles for Enterprise RAG
+
+The following design principles have emerged from building and operating enterprise RAG systems:
+
+1. **Optimize the pipeline, not individual components.** RAG quality is a system property. Improving one component may not improve overall quality if another component is the bottleneck.
+
+2. **Measure before you optimize.** You cannot improve what you cannot measure. Invest in evaluation infrastructure before investing in model improvements.
+
+3. **Build for change.** The RAG technology landscape evolves rapidly. Design your system with pluggable components that can be swapped without rewriting the entire pipeline.
+
+4. **Default to simple.** Start with the simplest approach that meets your requirements. Add complexity only when you have evidence that the simpler approach is insufficient.
+
+5. **Treat retrieval as a product.** Your retrieval system is a product that serves users. It needs monitoring, alerting, SLAs, and continuous improvement.
+
+6. **Cost is a feature.** Enterprise finance teams track cost per query. Design your system with cost visibility and cost optimization as first-class concerns.
+
+7. **Security is not optional.** Access control, audit trails, and data encryption are requirements, not nice-to-haves. Design them in from the start.
+
+8. **Quality is continuous.** RAG quality degrades over time as documents change, queries evolve, and models drift. Continuous evaluation and improvement are essential.
+
+---
+
+## 0.17 RAG Patterns at a Glance
+
+The following diagram illustrates the major RAG patterns covered in this book and when to apply each:
+
+```mermaid
+graph TD
+    A[Query] --> B{Query Complexity?}
+    B -->|Simple| C[Naive RAG]
+    B -->|Moderate| D[Advanced RAG]
+    B -->|Complex| E[Agentic RAG]
+    C --> F[Embed + Search + Generate]
+    D --> G[Rewrite + Hybrid Search + Rerank + Generate]
+    E --> H[Decompose + Multi-Step Retrieval + Synthesize]
+    F --> I[Answer]
+    G --> I
+    H --> I
+```
+
+| Pattern | When to Use | Quality | Cost | Latency |
+|---------|-------------|---------|------|---------|
+| **Naive RAG** | Prototyping, simple documents | Low-Medium | Low | Fast |
+| **Advanced RAG** | Production, diverse documents | Medium-High | Medium | Medium |
+| **Agentic RAG** | Complex queries, multi-source | High | High | Slow |
+| **Graph RAG** | Relationship-heavy domains | High | Medium-High | Medium |
+| **Multimodal RAG** | Images, tables, mixed content | High | High | Medium |
+
+Most enterprise systems start with Advanced RAG and add Agentic or Graph patterns as query complexity demands.
+
+---
+
+## 0.18 The RAG Evaluation Taxonomy
+
+Evaluation in RAG spans multiple dimensions. Understanding this taxonomy helps you choose the right metrics for your use case:
+
+| Dimension | Metrics | What It Measures | When to Use |
+|-----------|---------|-----------------|-------------|
+| **Retrieval Quality** | Precision@K, Recall@K, MRR, NDCG | Are we finding the right documents? | Always |
+| **Generation Quality** | Faithfulness, Relevance, Coherence | Is the LLM using context well? | Always |
+| **End-to-End Quality** | Answer Correctness, Task Completion | Is the system producing correct answers? | User-facing systems |
+| **Operational Quality** | Latency, Throughput, Cost, Availability | Is the system performant and reliable? | Production systems |
+| **User Quality** | Satisfaction, Adoption, Retention | Do users find the system useful? | Long-term operations |
+
+The taxonomy is hierarchical: you cannot fix generation quality if retrieval quality is poor. Start measuring at the bottom (retrieval) and work up.
+
+---
+
+## 0.19 A Note on Ethical Considerations
+
+RAG systems amplify the biases present in their document collections. If your contracts contain biased language, your RAG system will surface that bias. If your training data underrepresents certain perspectives, your retrieval system will not find those perspectives.
+
+Enterprise RAG architects must consider:
+
+- **Bias auditing**: Regularly audit retrieved content for demographic, cultural, and linguistic bias
+- **Transparency**: Users should know that answers come from specific documents, not the model's general knowledge
+- **Attribution**: Every answer should cite its sources, allowing users to verify claims
+- **Redress**: Users should be able to flag incorrect or biased content for review
+
+These are not optional considerations. They are requirements for responsible AI deployment, particularly in regulated industries where decisions based on RAG outputs can affect people's lives.
+
+---
+
+## 0.20 Key Takeaways
 
 1. **The gap between a notebook demo and production RAG is enormous.** It spans retrieval engineering, document processing, evaluation, governance, and operations. Plan for this complexity from the start.
 
@@ -450,6 +622,155 @@ These constraints are not independent. A regulated industry with high query volu
 9. **The retrieval-generation feedback loop is real.** Retrieval quality affects generation quality and vice versa. Optimize the system, not individual components.
 
 10. **Enterprise RAG is a multi-month effort.** Plan for 4-6 months from foundation to production. The quality engineering phase is not optional and is typically the longest phase.
+
+---
+
+## 0.21 The Business Case for RAG
+
+RAG is not just a technical decision — it is a business decision. The business case rests on three pillars:
+
+### 0.21.1 Productivity Gains
+
+Knowledge workers spend 20-30% of their time searching for information. A well-implemented RAG system can reduce search time by 60-80%, translating to significant productivity gains.
+
+| Role | Hours/Week Searching | With RAG | Savings | Annual Value (100 users) |
+|------|---------------------|----------|---------|-------------------------|
+| Legal researcher | 15 hours | 4 hours | 11 hours | $572,000 |
+| Financial analyst | 12 hours | 3 hours | 9 hours | $468,000 |
+| Customer support | 10 hours | 2 hours | 8 hours | $336,000 |
+| Technical writer | 8 hours | 2 hours | 6 hours | $252,000 |
+
+### 0.21.2 Risk Reduction
+
+RAG systems with proper attribution reduce the risk of acting on incorrect information. In regulated industries, this risk reduction has direct financial value.
+
+### 0.21.3 Revenue Enablement
+
+RAG systems enable faster decision-making, which can accelerate revenue-generating activities. Sales teams with instant access to relevant case studies, proposals, and competitive intelligence close deals faster.
+
+---
+
+## 0.22 Implementation Anti-Patterns
+
+The following anti-patterns are common in failed RAG implementations:
+
+| Anti-Pattern | Description | Consequence | Alternative |
+|-------------|-------------|-------------|-------------|
+| **Chunk-and-pray** | Use default chunking, hope for the best | Poor retrieval quality | Test multiple strategies |
+| **Embedding roulette** | Pick the cheapest embedding model | Domain mismatch, low precision | Benchmark on your data |
+| **Context flooding** | Dump all retrieved chunks into the prompt | Noise, hallucination, high cost | Rerank, compress, select |
+| **Metric myopia** | Optimize for one metric (e.g., latency) | Other metrics degrade | Multi-metric evaluation |
+| **Production blindness** | No monitoring after deployment | Silent quality degradation | Continuous monitoring |
+| **Human-proofing** | Remove all human oversight | Missed edge cases, bias | Human-in-the-loop design |
+
+Avoiding these anti-patterns is as important as following best practices. Each anti-pattern represents a shortcut that creates long-term costs.
+
+---
+
+## 0.23 What Success Looks Like
+
+A successful enterprise RAG system has the following characteristics:
+
+- **95%+ of queries return relevant results** (measured by Precision@5 > 80%)
+- **Users prefer the system over manual search** (measured by adoption rate > 70%)
+- **Cost per query is predictable and within budget** (measured by cost tracking)
+- **Quality is monitored and improving** (measured by weekly quality metrics)
+- **Regulatory requirements are met** (measured by compliance audits)
+- **The system handles growth** (measured by scaling tests)
+
+If your RAG system meets these criteria, it is delivering value. If it does not, the chapters in this book will help you identify and fix the gaps.
+
+---
+
+## 0.24 The Future of RAG
+
+RAG continues to evolve. The following trends are shaping the next generation of RAG systems:
+
+### 0.24.1 Agentic RAG
+
+The shift from static pipelines to agent-driven retrieval. Agents decompose complex queries, evaluate retrieval quality, retry with different strategies, and synthesize multi-source answers. Chapter 12 covers agentic RAG in depth.
+
+### 0.24.2 Multimodal RAG
+
+Extending beyond text to include images, tables, charts, code, and audio. A legal RAG system that can retrieve and reason about contract diagrams, a medical RAG system that can analyze medical images alongside clinical notes. Chapter 11 covers multimodal RAG.
+
+### 0.24.3 Knowledge Graph RAG
+
+Combining vector search with graph traversal to capture entity relationships. When a query involves relationships ("Which vendors have termination clauses that overlap with our force majeure provisions?"), graph traversal finds paths that vector search alone cannot. Chapter 11 covers Graph RAG.
+
+### 0.24.4 Self-Improving RAG
+
+Systems that automatically improve based on user feedback, query patterns, and retrieval outcomes. The system identifies low-quality retrievals, adjusts chunking strategies, and updates embeddings without human intervention.
+
+### 0.24.5 Long-Context LLMs
+
+As LLM context windows grow (200K+ tokens), the balance between retrieval and context changes. Instead of retrieving 5 chunks, you might retrieve 50. This changes the economics, the retrieval strategy, and the context engineering approach. Chapter 10 addresses this shift.
+
+These trends do not replace the fundamentals covered in this book. They build upon them. A solid understanding of information retrieval, document processing, chunking, and evaluation is prerequisite to building the next generation of RAG systems.
+
+---
+
+## 0.25 How Each Chapter Maps to the Pipeline
+
+The following table maps each chapter to its corresponding pipeline stage and the decisions it addresses:
+
+| Chapter | Pipeline Stage | Key Decisions |
+|---------|---------------|---------------|
+| Ch 1: RAG Fundamentals | Overall | Architecture pattern, RAG vs fine-tuning |
+| Ch 2: Information Retrieval | Retrieval | BM25 vs dense vs hybrid, scoring |
+| Ch 3: Document Processing | Ingestion | Parser selection, cleaning, metadata |
+| Ch 4: Chunking Strategies | Chunking | Strategy, size, overlap |
+| Ch 5: Embedding Models | Embedding | Model selection, dimensionality |
+| Ch 6: Vector Databases | Storage | Database selection, indexing |
+| Ch 7: Retrieval Strategies | Retrieval | Search configuration, filtering |
+| Ch 8: Reranking | Reranking | Model selection, candidate count |
+| Ch 9: Advanced Retrieval | Retrieval | Query decomposition, multi-step |
+| Ch 10: Context Engineering | Assembly | Prompt design, compression |
+| Ch 11: Knowledge Graphs | Retrieval | Graph construction, traversal |
+| Ch 12: Agentic RAG | Orchestration | Agent design, tool use |
+| Ch 13: Evaluation | Quality | Metrics, benchmarks, testing |
+| Ch 14: Production Architecture | Operations | Deployment, scaling, monitoring |
+| Ch 15: Security | Governance | Access control, compliance |
+| Ch 16: Enterprise Patterns | Architecture | Multi-tenancy, migration |
+
+---
+
+## 0.26 Prerequisites and Assumptions
+
+This book assumes the following knowledge and infrastructure:
+
+### 0.26.1 Technical Prerequisites
+
+- Python 3.10+ programming proficiency
+- Basic understanding of LLMs (tokens, context windows, prompting)
+- Familiarity with REST APIs and JSON
+- Basic command-line proficiency
+- Understanding of SQL and relational databases
+
+### 0.26.2 Infrastructure Assumptions
+
+- Cloud access (AWS, GCP, or Azure) for managed services
+- Python development environment with pip or poetry
+- Git for version control
+- Docker for containerized deployments (production chapters)
+
+### 0.26.3 Tool Versions
+
+All code examples in this book use versions current as of June 2026:
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Python | 3.10-3.12 | Primary language |
+| LangChain | 0.2+ | Orchestration |
+| LlamaIndex | 0.10+ | Data ingestion |
+| OpenAI SDK | 1.0+ | LLM and embedding API |
+| Cohere SDK | 5.0+ | Reranking API |
+| Elasticsearch | 8.x | Hybrid search |
+| Weaviate | 1.28+ | Vector database |
+| Pydantic | 2.x | Schema validation |
+| Pytest | 8.x | Testing |
+
+If you are reading this book after June 2026, verify current versions at provider documentation. The concepts are timeless; the implementations evolve.
 
 ---
 

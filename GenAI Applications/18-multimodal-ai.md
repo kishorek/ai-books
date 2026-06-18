@@ -1,39 +1,1147 @@
 # Chapter 18: Multimodal AI
 
-Multimodal AI processes and generates across text, images, audio, video, and documents. Most enterprise knowledge is not just text — it includes tables, charts, diagrams, and images. Multimodal models enable new application types that were not possible with text-only LLMs.
+> "The most valuable information in an enterprise is not stored as text. It lives in charts, diagrams, scanned documents, meeting recordings, and video demonstrations. Multimodal AI makes this information accessible to machines — and therefore to people."
 
-## Vision Capabilities
+---
 
-Modern multimodal models process images natively. GPT-5.4, Claude Sonnet 4.6, and Gemini 2.5 Pro all accept image inputs. The capability goes beyond OCR — these models understand layout, charts, diagrams, and visual relationships.
+## Introduction
 
-For document processing, vision models combine OCR with layout understanding. Instead of extracting text and losing structure, the model reads the document as a human would — understanding headers, tables, columns, and the relationship between text and images.
+Most enterprise knowledge is not just text. It includes financial charts in earnings reports, architectural diagrams in design documents, scanned contracts with handwritten signatures, meeting recordings with action items, product photos with defect annotations, and dashboards with real-time metrics. Text-only LLMs cannot process this information. Multimodal AI bridges this gap — enabling models to understand, reason over, and generate content across text, images, audio, video, and documents.
 
-The architectural implication is that multimodal processing simplifies document pipelines. Instead of separate OCR, layout analysis, and table extraction steps, a single vision model call can process a document page and return structured output.
+The central thesis of this chapter is **unified understanding**: the architectural pattern where a single model call processes multiple modalities and produces structured output that feeds into existing pipelines. Instead of separate OCR, layout analysis, table extraction, image classification, and speech-to-text steps, a multimodal model handles the entire pipeline in one inference call. This simplifies architecture, reduces latency, and improves accuracy by allowing the model to reason across modalities jointly.
 
-## Audio and Video
+The practical impact is significant. A document processing pipeline that previously required five separate services (OCR, layout analysis, table extraction, image classification, entity extraction) and 3-5 seconds of total latency can be replaced by a single multimodal model call in 1-2 seconds. A meeting assistant that previously required separate speech-to-text, speaker diarization, and summarization services can now process audio end-to-end. A quality inspection system that previously required separate image classification and defect reporting can now analyze photos and generate structured reports in one step.
 
-Audio processing is production-ready with models like Whisper for speech-to-text. Meeting assistants can transcribe, identify speakers, extract action items, and generate summaries. Real-time APIs enable voice interfaces with sub-second latency.
+We will examine vision capabilities for document processing, audio and video understanding, image generation, cross-modal search, and a full case study of a multimodal document processing system with cost analysis and implementation code.
 
-Video understanding is emerging but less mature. The typical approach extracts key frames and processes them with vision models, then synthesizes the frame-level analyses into a video-level understanding.
+### The Multimodal Landscape
 
-## Image Generation
+| Modality | Input | Output | Maturity | Production-Ready Models |
+|----------|-------|--------|----------|------------------------|
+| **Text** | Prompts, documents | Generated text, classifications | Mature | GPT-4o, Claude Sonnet, Gemini Pro |
+| **Image** | Photos, screenshots, scans | Descriptions, classifications, structured data | Mature | GPT-4o Vision, Claude Vision, Gemini Pro |
+| **Audio** | Recordings, live streams | Transcriptions, summaries, sentiment | Mature | Whisper, Gemini Pro, Claude |
+| **Video** | Recorded video, live streams | Descriptions, summaries, event detection | Emerging | Gemini Pro (video), GPT-4o (frames) |
+| **Document** | PDFs, scanned pages | Structured extraction, summaries | Mature | Claude Vision, GPT-4o, specialized OCR |
 
-Image generation (DALL-E, Imagen) enables applications that create visual content — marketing materials, product mockups, data visualizations. The integration pattern is similar to text generation: provide a prompt, receive an output. The difference is that image outputs require different storage and delivery infrastructure.
+### Chapter Roadmap
 
-## Cross-Modal Search
+We will examine:
 
-CLIP and similar models enable search across modalities. You can search for images using text queries ("find charts showing revenue growth") or search for text using image queries ("find documents related to this diagram"). This requires embedding all modalities in the same vector space.
+1. **Vision capabilities** — image understanding, document processing, chart analysis
+2. **Audio processing** — speech-to-text, meeting assistants, voice interfaces
+3. **Video understanding** — frame extraction, event detection, video summarization
+4. **Image generation** — marketing content, mockups, data visualization
+5. **Cross-modal search** — CLIP embeddings, unified vector spaces
+6. **Full case study** — enterprise document processing pipeline with architecture, cost analysis, and implementation
+7. **Testing** — multimodal quality evaluation and adversarial testing
 
-## Key Takeaways
+---
 
-- Vision models are mature for document processing — OCR plus layout analysis plus structured extraction
-- Audio processing (Whisper, Realtime API) is production-ready
-- Video understanding is emerging — key frame extraction plus vision model analysis
-- Multimodal models simplify document pipelines — one model call instead of multiple processing steps
-- CLIP enables cross-modal search — embed images and text in the same space
+## 18.1 Vision Capabilities
 
-## Further Reading
+### 18.1.1 How Vision Models Work
 
-- OpenAI Vision and Realtime API documentation
-- Google Gemini Multimodal documentation
-- CLIP Paper (Radford et al., 2021)
+Modern multimodal models process images natively. GPT-4o, Claude Sonnet, and Gemini 2.5 Pro all accept image inputs. The capability goes beyond OCR — these models understand layout, charts, diagrams, and visual relationships.
+
+The architecture typically involves:
+
+1. **Image tokenization**: The image is divided into patches and converted to token embeddings using a vision encoder (e.g., ViT, SigLIP).
+2. **Cross-modal alignment**: Image tokens are aligned with text tokens in the same embedding space, allowing the model to reason across modalities.
+3. **Multimodal inference**: The model processes both text and image tokens jointly, understanding the relationship between visual and textual content.
+
+```mermaid
+graph LR
+    A[Image Input] --> B[Vision Encoder]
+    B --> C[Image Tokens]
+    D[Text Input] --> E[Text Tokenizer]
+    E --> F[Text Tokens]
+    C --> G[Multimodal Transformer]
+    F --> G
+    G --> H[Structured Output]
+```
+
+### 18.1.2 Document Processing Pipeline
+
+The key architectural simplification: a single multimodal model call replaces multiple specialized services.
+
+**Before (traditional pipeline)**:
+
+```mermaid
+graph LR
+    A[PDF/Scan] --> B[OCR Service]
+    B --> C[Layout Analyzer]
+    C --> D[Table Extractor]
+    D --> E[Image Classifier]
+    E --> F[Entity Extractor]
+    F --> G[Structured Output]
+
+    B -.->|100-300ms| H[Latency]
+    C -.->|200-500ms| H
+    D -.->|300-800ms| H
+    E -.->|200-400ms| H
+    F -.->|100-300ms| H
+    H -.->|Total: 900-2300ms| I[High latency, multiple failure points]
+```
+
+**After (multimodal pipeline)**:
+
+```mermaid
+graph LR
+    A[PDF/Scan] --> B[Multimodal LLM]
+    B --> C[Structured Output]
+
+    B -.->|800-2000ms| D[Single call, single failure point]
+```
+
+### 18.1.3 Implementation
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+import base64
+
+class DocumentPage(BaseModel):
+    page_number: int
+    document_type: str = Field(description="invoice, contract, report, form, letter")
+    has_tables: bool
+    has_images: bool
+    has_handwriting: bool
+    text_content: str
+    tables: list[dict] = Field(default_factory=list)
+    key_entities: dict[str, str] = Field(default_factory=dict)
+    summary: str = ""
+
+class InvoiceData(BaseModel):
+    invoice_number: str
+    vendor_name: str
+    vendor_address: str
+    invoice_date: str
+    due_date: str
+    line_items: list[dict]
+    subtotal: float
+    tax: float
+    total: float
+    currency: str = "USD"
+
+class ContractData(BaseModel):
+    contract_title: str
+    parties: list[str]
+    effective_date: str
+    expiration_date: str
+    key_terms: list[str]
+    obligations: list[str]
+    total_value: float | None = None
+    governing_law: str = ""
+
+class MultimodalDocumentProcessor:
+    """Process documents using multimodal LLM for unified understanding."""
+
+    def __init__(self, llm_client):
+        self.llm = llm_client
+
+    async def process_page(
+        self, image_bytes: bytes, page_number: int
+    ) -> DocumentPage:
+        """Process a single document page using vision model."""
+        image_b64 = base64.b64encode(image_bytes).decode()
+
+        response = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": """Analyze this document page and return structured data:
+1. Document type (invoice, contract, report, form, letter)
+2. Whether it contains tables, images, or handwriting
+3. Full text content
+4. Any tables (as JSON objects with headers and rows)
+5. Key entities (names, dates, amounts, addresses)
+6. Brief summary
+
+Be precise with numbers, dates, and proper nouns. Preserve table structure."""
+                    },
+                ],
+            }],
+            response_format=DocumentPage,
+        )
+
+        return response
+
+    async def extract_invoice(self, image_bytes: bytes) -> InvoiceData:
+        """Extract structured invoice data from a document image."""
+        image_b64 = base64.b64encode(image_bytes).decode()
+
+        response = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": """Extract invoice data from this document. Return:
+- Invoice number
+- Vendor name and address
+- Invoice date and due date
+- Line items (description, quantity, unit price, total)
+- Subtotal, tax, and total amounts
+- Currency
+
+Be precise with all monetary amounts. Preserve line item structure."""
+                    },
+                ],
+            }],
+            response_format=InvoiceData,
+        )
+
+        return response
+
+    async def extract_contract(self, image_bytes: bytes) -> ContractData:
+        """Extract key contract terms from a document image."""
+        image_b64 = base64.b64encode(image_bytes).decode()
+
+        response = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": """Extract key contract terms from this document. Return:
+- Contract title
+- All parties involved
+- Effective date and expiration date
+- Key terms and conditions
+- Obligations of each party
+- Total contract value (if present)
+- Governing law
+
+Preserve the specific language of key terms."""
+                    },
+                ],
+            }],
+            response_format=ContractData,
+        )
+
+        return response
+```
+
+### 18.1.4 Chart and Diagram Understanding
+
+Vision models excel at understanding visual data representations:
+
+```python
+class ChartAnalyzer:
+    """Analyze charts, graphs, and diagrams from images."""
+
+    def __init__(self, llm_client):
+        self.llm = llm_client
+
+    async def analyze_chart(self, image_bytes: bytes) -> dict:
+        image_b64 = base64.b64encode(image_bytes).decode()
+
+        response = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": """Analyze this chart/graph and return:
+1. Chart type (bar, line, pie, scatter, waterfall, etc.)
+2. Title and axis labels
+3. Data points (exact values where readable)
+4. Trends and patterns
+5. Key insights
+6. Anomalies or notable observations
+
+Be precise with numeric values. Note any unusual patterns."""
+                    },
+                ],
+            }],
+        )
+
+        return response
+
+    async def analyze_architecture_diagram(self, image_bytes: bytes) -> dict:
+        image_b64 = base64.b64encode(image_bytes).decode()
+
+        response = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": """Analyze this architecture diagram and return:
+1. System components (services, databases, queues, etc.)
+2. Data flow direction between components
+3. Communication protocols (REST, gRPC, async, etc.)
+4. Failure points and single points of failure
+5. Scalability bottlenecks
+6. Security boundaries
+
+List all components and their relationships."""
+                    },
+                ],
+            }],
+        )
+
+        return response
+```
+
+### 18.1.5 Vision Model Comparison
+
+| Model | Max Image Size | Vision Quality | Latency (p50) | Cost per 1K Image Tokens | Best For |
+|-------|---------------|---------------|---------------|-------------------------|----------|
+| GPT-4o | 20MB | Excellent | 400ms | $0.00375 | General vision, charts |
+| Claude Sonnet | 20MB | Excellent | 500ms | $0.0045 | Documents, long context |
+| Gemini 2.5 Pro | 20MB | Very Good | 350ms | $0.003125 | High-volume, video frames |
+| Claude Haiku | 20MB | Good | 150ms | $0.000375 | Simple classification |
+
+---
+
+## 18.2 Audio Processing
+
+### 18.2.1 Speech-to-Text Pipeline
+
+Audio processing is production-ready. The standard pipeline involves transcription, speaker diarization, and content extraction:
+
+```mermaid
+graph LR
+    A[Audio Input] --> B[Speech-to-Text]
+    B --> C[Speaker Diarization]
+    C --> D[Content Extraction]
+    D --> E[Structured Output]
+
+    B -.->|Whisper / Gemini| F[Transcription]
+    C -.->|Speaker labels| G[Who said what]
+    D -.->|LLM analysis| H[Action items, summary]
+```
+
+### 18.2.2 Meeting Assistant Implementation
+
+```python
+from pydantic import BaseModel, Field
+
+class SpeakerSegment(BaseModel):
+    speaker: str
+    start_time: float
+    end_time: float
+    text: str
+
+class MeetingSummary(BaseModel):
+    title: str
+    duration_minutes: float
+    participants: list[str]
+    key_topics: list[str]
+    decisions: list[str]
+    action_items: list[dict]
+    follow_up_questions: list[str]
+
+class MeetingAssistant:
+    """Process meeting recordings into structured summaries."""
+
+    def __init__(self, whisper_client, llm_client):
+        self.whisper = whisper_client
+        self.llm = llm_client
+
+    async def process_meeting(self, audio_path: str) -> MeetingSummary:
+        # Step 1: Transcribe with timestamps
+        transcription = await self.whisper.transcribe(
+            audio_path,
+            response_format="verbose_json",
+            timestamp_granularities=["segment", "word"],
+        )
+
+        # Step 2: Speaker diarization
+        segments = await self._diarize(transcription)
+
+        # Step 3: Generate structured summary
+        full_text = "\n".join(
+            f"[{s.speaker}] {s.text}" for s in segments
+        )
+
+        summary = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": f"""Analyze this meeting transcript and return a structured summary:
+
+Meeting Transcript:
+{full_text}
+
+Return:
+- Meeting title
+- Duration
+- List of participants (by speaker label)
+- Key topics discussed
+- Decisions made
+- Action items (who, what, by when)
+- Follow-up questions that should be addressed"""
+            }],
+            response_format=MeetingSummary,
+        )
+
+        return summary
+
+    async def _diarize(self, transcription: dict) -> list[SpeakerSegment]:
+        """Assign speaker labels to transcription segments."""
+        # In production, use a diarization model (pyannote, etc.)
+        # Simplified: treat each segment as separate speaker
+        segments = []
+        for seg in transcription.get("segments", []):
+            segments.append(SpeakerSegment(
+                speaker=f"Speaker {len(segments) % 4 + 1}",
+                start_time=seg["start"],
+                end_time=seg["end"],
+                text=seg["text"],
+            ))
+        return segments
+```
+
+### 18.2.3 Real-Time Voice Interface
+
+```python
+class VoiceInterface:
+    """Real-time voice interface using streaming APIs."""
+
+    def __init__(self, openai_client):
+        self.client = openai_client
+
+    async def handle_voice_query(self, audio_stream) -> str:
+        """Process real-time audio and return response."""
+        # Option 1: Use Realtime API for sub-second latency
+        response = await self.client.audio.conversations.create(
+            model="gpt-4o-realtime-preview",
+            audio=audio_stream,
+            voice="alloy",
+            instructions="You are a helpful assistant. Respond concisely.",
+        )
+        return response.text
+
+    async def batch_transcribe(self, audio_path: str) -> dict:
+        """Batch transcription for non-real-time use cases."""
+        with open(audio_path, "rb") as audio_file:
+            response = await self.client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="verbose_json",
+            )
+        return response
+```
+
+### 18.2.4 Audio Processing Comparison
+
+| Approach | Latency | Cost per Minute | Accuracy (WER) | Best For |
+|----------|---------|----------------|----------------|----------|
+| OpenAI Realtime API | <1s | $0.06 | 5-8% | Live voice interfaces |
+| Whisper v3 | 2-5s (batch) | $0.006 | 5-8% | Meeting recordings |
+| Gemini Pro Audio | 3-8s (batch) | $0.004 | 8-12% | High-volume transcription |
+| Self-hosted Whisper | 1-3s | $0.001 (compute) | 5-8% | On-premise requirements |
+
+---
+
+## 18.3 Video Understanding
+
+### 18.3.1 The Frame Extraction Approach
+
+Video understanding extracts key frames and processes them with vision models, then synthesizes frame-level analyses into video-level understanding:
+
+```mermaid
+graph TB
+    A[Video Input] --> B[Frame Extractor]
+    B --> C[Key Frame Selection]
+    C --> D[Vision Model - per frame]
+    D --> E[Frame-Level Analysis]
+    E --> F[Cross-Frame Synthesis]
+    F --> G[Video-Level Understanding]
+
+    B -.->|1 frame/second| H[~60 frames for 1 min video]
+    D -.->|Batch processing| I[Parallel inference]
+    F -.->|LLM synthesis| J[Coherent narrative]
+```
+
+### 18.3.2 Implementation
+
+```python
+import cv2
+import numpy as np
+
+class VideoAnalyzer:
+    """Analyze video content using frame extraction + vision models."""
+
+    def __init__(self, vision_model, llm_client):
+        self.vision = vision_model
+        self.llm = llm_client
+
+    async def analyze_video(
+        self,
+        video_path: str,
+        frame_interval: float = 1.0,  # Extract 1 frame per second
+    ) -> dict:
+        # Step 1: Extract key frames
+        frames = self._extract_frames(video_path, frame_interval)
+
+        # Step 2: Analyze each frame
+        frame_analyses = []
+        for i, frame in enumerate(frames):
+            analysis = await self.vision.analyze(
+                frame,
+                prompt=f"Describe what is happening in this video frame (frame {i + 1} of {len(frames)})."
+            )
+            frame_analyses.append({
+                "frame_number": i + 1,
+                "timestamp": i * frame_interval,
+                "analysis": analysis,
+            })
+
+        # Step 3: Synthesize into video-level understanding
+        analysis_text = "\n".join(
+            f"[{f['timestamp']:.1f}s] {f['analysis']}"
+            for f in frame_analyses
+        )
+
+        summary = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": f"""Based on these frame-by-frame analyses of a video, provide:
+1. Overall video summary
+2. Key events and timestamps
+3. Objects/people present
+4. Scene changes
+5. Notable actions or interactions
+
+Frame analyses:
+{analysis_text}"""
+            }],
+        )
+
+        return {
+            "summary": summary,
+            "frame_count": len(frames),
+            "frame_analyses": frame_analyses,
+            "duration_seconds": len(frames) * frame_interval,
+        }
+
+    def _extract_frames(
+        self, video_path: str, interval: float
+    ) -> list[np.ndarray]:
+        """Extract frames at specified interval."""
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_interval_frames = int(fps * interval)
+
+        frames = []
+        frame_count = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_count % frame_interval_frames == 0:
+                frames.append(frame)
+            frame_count += 1
+        cap.release()
+
+        return frames
+```
+
+### 18.3.3 Native Video Models
+
+Some models now accept video directly, eliminating frame extraction:
+
+```python
+class NativeVideoAnalyzer:
+    """Use models with native video understanding."""
+
+    def __init__(self, gemini_client):
+        self.gemini = gemini_client
+
+    async def analyze_video(self, video_path: str) -> dict:
+        # Gemini 2.5 Pro accepts video natively
+        with open(video_path, "rb") as f:
+            video_data = f.read()
+
+        response = await self.gemini.generate(
+            model="gemini-2.5-pro",
+            content=[{
+                "mime_type": "video/mp4",
+                "data": video_data,
+            }],
+            prompt="""Analyze this video and provide:
+1. Summary of content
+2. Key events with timestamps
+3. People present and their actions
+4. Scene changes
+5. Notable visual details""",
+        )
+
+        return response
+```
+
+### 18.3.4 Video Processing Comparison
+
+| Approach | Latency | Cost per Minute of Video | Quality | Best For |
+|----------|---------|-------------------------|---------|----------|
+| Frame extraction + vision LLM | 30-120s | $0.10-$0.50 | Good | Short clips, key moments |
+| Native video model (Gemini) | 10-30s | $0.05-$0.20 | Very Good | Full video analysis |
+| Specialized video model | 5-15s | $0.02-$0.10 | Good | High-volume, simple tasks |
+
+---
+
+## 18.4 Image Generation
+
+### 18.4.1 Integration Patterns
+
+Image generation enables applications that create visual content — marketing materials, product mockups, data visualizations. The integration pattern is similar to text generation but outputs require different storage and delivery:
+
+```python
+class ImageGenerator:
+    """Generate images for marketing, mockups, and visualizations."""
+
+    def __init__(self, dalle_client):
+        self.dalle = dalle_client
+
+    async def generate_marketing_image(
+        self, brief: str, style: str = "professional"
+    ) -> dict:
+        """Generate marketing image from a creative brief."""
+        response = await self.dalle.images.generate(
+            model="dall-e-3",
+            prompt=f"Professional {style} marketing image: {brief}",
+            size="1792x1024",
+            quality="hd",
+            style="natural",
+        )
+
+        return {
+            "url": response.data[0].url,
+            "revised_prompt": response.data[0].revised_prompt,
+        }
+
+    async def generate_product_mockup(
+        self, product_description: str, background: str = "white"
+    ) -> dict:
+        """Generate product mockup."""
+        response = await self.dalle.images.generate(
+            model="dall-e-3",
+            prompt=f"Product photography: {product_description}, "
+                   f"{background} background, studio lighting, high quality",
+            size="1024x1024",
+            quality="hd",
+        )
+
+        return {"url": response.data[0].url}
+
+    async def generate_infographic(
+        self, data: dict, style: str = "minimal"
+    ) -> str:
+        """Generate infographic from structured data."""
+        # Convert data to prompt
+        data_text = "\n".join(f"{k}: {v}" for k, v in data.items())
+
+        response = await self.dalle.images.generate(
+            model="dall-e-3",
+            prompt=f"""Create a {style} infographic with this data:
+{data_text}
+
+Use clear labels, charts, and visual hierarchy.""",
+            size="1024x1792",
+            quality="hd",
+        )
+
+        return response.data[0].url
+```
+
+### 18.4.2 Image Generation Cost and Quality
+
+| Model | Resolution | Quality | Cost per Image | Generation Time | Best For |
+|-------|-----------|---------|---------------|-----------------|----------|
+| DALL-E 3 | 1024x1024 | Good | $0.04 | 5-15s | Marketing, mockups |
+| DALL-E 3 HD | 1792x1024 | Very Good | $0.08 | 10-20s | High-quality marketing |
+| Imagen 3 | 1024x1024 | Very Good | $0.03 | 3-10s | High-volume |
+| Stable Diffusion | 1024x1024 | Good | $0.001 (compute) | 5-20s | Self-hosted, cost-sensitive |
+
+---
+
+## 18.5 Cross-Modal Search
+
+### 18.5.1 CLIP Embeddings
+
+CLIP (Contrastive Language-Image Pre-training) enables search across modalities. You can search for images using text queries or search for text using image queries by embedding all modalities in the same vector space:
+
+```python
+import numpy as np
+
+class CrossModalSearch:
+    """Search across text and images using CLIP embeddings."""
+
+    def __init__(self, clip_model, vector_store):
+        self.clip = clip_model
+        self.vector_store = vector_store
+
+    def index_image(self, image_path: str, metadata: dict):
+        """Index an image with associated text metadata."""
+        # Generate image embedding
+        image_embedding = self.clip.encode_image(image_path)
+
+        # Store with metadata
+        self.vector_store.upsert(
+            id=f"img:{metadata['id']}",
+            vector=image_embedding,
+            metadata={**metadata, "modality": "image"},
+        )
+
+    def index_text(self, text: str, metadata: dict):
+        """Index text for cross-modal search."""
+        text_embedding = self.clip.encode_text(text)
+
+        self.vector_store.upsert(
+            id=f"txt:{metadata['id']}",
+            vector=text_embedding,
+            metadata={**metadata, "modality": "text"},
+        )
+
+    def search_by_text(self, query: str, top_k: int = 5) -> list[dict]:
+        """Find images matching a text query."""
+        query_embedding = self.clip.encode_text(query)
+
+        results = self.vector_store.query(
+            vector=query_embedding,
+            top_k=top_k,
+            filter={"modality": "image"},
+        )
+
+        return results
+
+    def search_by_image(self, image_path: str, top_k: int = 5) -> list[dict]:
+        """Find text/images similar to a query image."""
+        query_embedding = self.clip.encode_image(image_path)
+
+        results = self.vector_store.query(
+            vector=query_embedding,
+            top_k=top_k,
+        )
+
+        return results
+```
+
+### 18.5.2 Cross-Modal Search Use Cases
+
+| Use Case | Query Modality | Search Target | Example |
+|----------|---------------|---------------|---------|
+| Document search | Text | Images | "Find charts showing revenue growth" |
+| Visual QA | Image | Text | "Find documents related to this diagram" |
+| Product search | Text | Images | "Find products matching this description" |
+| Duplicate detection | Image | Images | "Find similar images in the database" |
+| Content moderation | Image | Text | "Find images matching this policy description" |
+
+---
+
+## 18.6 Case Study: Enterprise Document Processing Pipeline
+
+### 18.6.1 Problem Statement
+
+A legal services firm processes 10,000 documents per day — contracts, court filings, financial disclosures, and correspondence. The current pipeline uses separate services for OCR, layout analysis, table extraction, and entity recognition. The pipeline is:
+
+- Slow: Average 4.5 seconds per page
+- Expensive: $0.03 per page across multiple services
+- Fragile: Each service is a failure point
+- Inaccurate: 12% error rate on complex documents (multi-column layouts, handwritten notes)
+
+The firm needs:
+
+- Process documents in under 2 seconds per page
+- Reduce cost to under $0.01 per page
+- Achieve >95% accuracy on complex documents
+- Extract structured data from invoices, contracts, and court filings
+- Maintain SOC2 compliance with audit trails
+
+### 18.6.2 Architecture
+
+```mermaid
+graph TB
+    subgraph "Document Intake"
+        A[Email / Upload] --> B[Document Router]
+        B --> C[PDF Parser]
+        C --> D[Page Extractor]
+    end
+
+    subgraph "Processing Pipeline"
+        D --> E[Multimodal LLM<br/>Claude Sonnet]
+        E --> F{Document Type}
+        F -->|Invoice| G[Invoice Extractor]
+        F -->|Contract| H[Contract Extractor]
+        F -->|Court Filing| I[Court Filing Extractor]
+        F -->|Other| J[General Extractor]
+    end
+
+    subgraph "Validation"
+        G --> K[Pydantic Validator]
+        H --> K
+        I --> K
+        J --> K
+        K --> L{Valid?}
+        L -->|Yes| M[Write to Database]
+        L -->|No| N[Human Review Queue]
+    end
+
+    subgraph "Compliance"
+        E --> O[Audit Logger]
+        K --> O
+        O --> P[S3 Encrypted Store]
+    end
+```
+
+### 18.6.3 Implementation
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+import asyncio
+
+class ProcessedDocument(BaseModel):
+    document_id: str
+    document_type: Literal["invoice", "contract", "court_filing", "correspondence", "other"]
+    page_count: int
+    extracted_data: dict
+    confidence: float = Field(ge=0.0, le=1.0)
+    processing_time_ms: float
+    requires_review: bool = False
+
+class DocumentPipeline:
+    """End-to-end document processing pipeline."""
+
+    def __init__(self, llm_client, validator, audit_logger):
+        self.llm = llm_client
+        self.validator = validator
+        self.audit = audit_logger
+
+    async def process_document(
+        self, document_id: str, pages: list[bytes]
+    ) -> ProcessedDocument:
+        start_time = time.time()
+
+        # Step 1: Classify document type (process first page only)
+        doc_type = await self._classify_document(pages[0])
+
+        # Step 2: Process all pages in parallel
+        page_tasks = [
+            self._process_page(page, i, doc_type)
+            for i, page in enumerate(pages)
+        ]
+        page_results = await asyncio.gather(*page_tasks)
+
+        # Step 3: Merge page results
+        merged = self._merge_page_results(page_results, doc_type)
+
+        # Step 4: Validate extracted data
+        validation = self.validator.validate(merged, doc_type)
+
+        # Step 5: Determine if human review needed
+        requires_review = (
+            validation["confidence"] < 0.85
+            or not validation["is_complete"]
+            or validation["has_anomalies"]
+        )
+
+        # Step 6: Audit log
+        processing_time = (time.time() - start_time) * 1000
+        await self.audit.log({
+            "document_id": document_id,
+            "doc_type": doc_type,
+            "page_count": len(pages),
+            "processing_time_ms": processing_time,
+            "confidence": validation["confidence"],
+            "requires_review": requires_review,
+        })
+
+        return ProcessedDocument(
+            document_id=document_id,
+            document_type=doc_type,
+            page_count=len(pages),
+            extracted_data=merged,
+            confidence=validation["confidence"],
+            processing_time_ms=processing_time,
+            requires_review=requires_review,
+        )
+
+    async def _classify_document(self, first_page: bytes) -> str:
+        """Classify document type from first page."""
+        response = await self.llm.classify(
+            image=first_page,
+            categories=["invoice", "contract", "court_filing", "correspondence", "other"],
+        )
+        return response.category
+
+    async def _process_page(
+        self, page_bytes: bytes, page_num: int, doc_type: str
+    ) -> dict:
+        """Process a single page based on document type."""
+        extraction_schemas = {
+            "invoice": InvoiceData,
+            "contract": ContractData,
+            "court_filing": CourtFilingData,
+        }
+
+        schema = extraction_schemas.get(doc_type)
+
+        response = await self.llm.generate(
+            model="claude-sonnet-4-20250514",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": base64.b64encode(page_bytes).decode(),
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": f"Extract all data from this {doc_type} page. "
+                               f"Be precise with numbers, dates, and names.",
+                    },
+                ],
+            }],
+            response_format=schema if schema else None,
+        )
+
+        return {"page": page_num, "data": response}
+
+    def _merge_page_results(
+        self, results: list[dict], doc_type: str
+    ) -> dict:
+        """Merge multi-page extractions into a single record."""
+        if doc_type == "invoice" and len(results) == 1:
+            return results[0]["data"]
+
+        # For multi-page documents, concatenate relevant fields
+        merged = {"pages": []}
+        for result in results:
+            merged["pages"].append(result["data"])
+        return merged
+```
+
+### 18.6.4 Cost Calculations
+
+**Monthly volume**: 10,000 documents/day x 30 days = 300,000 documents/month
+**Average pages per document**: 4 pages = 1,200,000 pages/month
+
+| Component | Per-Page Cost | Monthly Cost | Notes |
+|-----------|-------------|-------------|-------|
+| Claude Sonnet (classification) | $0.0008 | $960 | ~200 tokens per classification |
+| Claude Sonnet (extraction) | $0.004 | $4,800 | ~2,000 input + 500 output tokens |
+| Pydantic validation | $0.000001 | $1.20 | CPU only, no API calls |
+| Audit logging (S3) | $0.00002 | $24 | ~5KB per document |
+| Human review (5% of docs) | $0.25 | $150,000 | 60,000 pages x $2.50/page |
+| **Total per page (without review)** | **$0.0048** | | |
+| **Total per page (with review)** | **$0.13** | | |
+| **Total monthly** | | **$155,785** | |
+
+### 18.6.5 Comparison: Old vs. New Pipeline
+
+| Metric | Old Pipeline | New Pipeline | Improvement |
+|--------|-------------|-------------|-------------|
+| Processing time per page | 4.5s | 1.2s | 73% faster |
+| Cost per page | $0.03 | $0.0048 | 84% cheaper |
+| Accuracy (complex docs) | 88% | 96% | +8 percentage points |
+| Failure points | 5 services | 1 LLM call | 80% fewer |
+| Human review rate | 15% | 5% | 67% less review |
+| Monthly cost (excl. review) | $36,000 | $5,785 | 84% savings |
+
+### 18.6.6 Reliability Engineering
+
+| Component | Availability | Failure Mode | Recovery |
+|-----------|-------------|--------------|----------|
+| Document Router | 99.99% | Lambda | Automatic retry |
+| PDF Parser | 99.9% | ECS | Auto-scaling |
+| Claude Sonnet | 99.9% | AWS managed | Retry + fallback model |
+| Pydantic Validator | 99.99% | Lambda | Automatic retry |
+| Audit Logger | 99.95% | SQS + S3 | DLQ + retry |
+| **System total** | **99.8%** | | **Composite** |
+
+Fallback strategy: if Claude Sonnet is unavailable, fall back to Claude Haiku (lower quality but higher availability). If both are unavailable, queue documents for retry with exponential backoff.
+
+---
+
+## 18.7 Testing Multimodal Systems
+
+### 18.7.1 Vision Quality Tests
+
+```python
+import pytest
+from PIL import Image
+
+class TestVisionProcessing:
+    def setup_method(self):
+        self.processor = MultimodalDocumentProcessor(llm_client=test_llm)
+
+    def test_invoice_extraction_accuracy(self):
+        """Verify invoice data extraction matches ground truth."""
+        # Load test invoice image
+        image = load_test_image("test_invoice.png")
+
+        result = asyncio.run(self.processor.extract_invoice(image))
+
+        assert result.invoice_number == "INV-2025-001"
+        assert result.total == 1250.00
+        assert result.vendor_name == "Acme Corp"
+
+    def test_handles_low_quality_images(self):
+        """Verify extraction works on low-resolution scans."""
+        image = load_test_image("low_quality_scan.png")
+
+        result = asyncio.run(self.processor.extract_invoice(image))
+
+        # Should still extract key fields, even if confidence is lower
+        assert result.invoice_number is not None
+        assert result.total is not None
+
+    def test_rejects_non_document_images(self):
+        """Verify non-document images are handled gracefully."""
+        image = load_test_image("random_photo.jpg")
+
+        result = asyncio.run(self.processor.process_page(image, page_number=1))
+
+        assert result.document_type == "other"
+
+class TestCrossModalSearch:
+    def setup_method(self):
+        self.search = CrossModalSearch(clip_model=test_clip, vector_store=test_store)
+
+    def test_text_query_finds_matching_images(self):
+        self.search.index_image("chart_revenue.png", {"id": "1", "topic": "revenue"})
+        results = self.search.search_by_text("revenue growth chart")
+        assert len(results) > 0
+        assert results[0]["id"] == "1"
+
+    def test_image_query_finds_similar_images(self):
+        self.search.index_image("product_a.png", {"id": "a"})
+        results = self.search.search_by_image("product_a_similar.png")
+        assert len(results) > 0
+```
+
+### 18.7.2 Audio Quality Tests
+
+```python
+class TestAudioProcessing:
+    def test_transcription_accuracy(self):
+        """Verify transcription matches ground truth within WER threshold."""
+        assistant = MeetingAssistant(whisper_client=test_whisper, llm_client=test_llm)
+
+        result = asyncio.run(assistant.process_meeting("test_meeting.mp3"))
+
+        # Word Error Rate should be below 10%
+        wer = calculate_wer(result.transcription, ground_truth)
+        assert wer < 0.10
+
+    def test_speaker_count(self):
+        """Verify correct number of speakers identified."""
+        result = asyncio.run(assistant.process_meeting("two_speakers.mp3"))
+        assert len(result.participants) == 2
+```
+
+### 18.7.3 Multimodal Quality Metrics
+
+| Metric | Target | Measurement Method |
+|--------|--------|--------------------|
+| Invoice extraction accuracy | >97% | Compare with ground truth invoices |
+| Document classification accuracy | >95% | Confusion matrix on test set |
+| Chart data extraction accuracy | >90% | Compare extracted values with source data |
+| Transcription WER | <10% | Word Error Rate against ground truth |
+| Processing latency (per page) | <2s | p95 measurement |
+| Human review rate | <5% | Percentage requiring manual correction |
+
+---
+
+## 18.8 Key Takeaways
+
+1. **Multimodal models simplify document pipelines.** A single model call replaces OCR, layout analysis, table extraction, and entity recognition. This reduces latency by 73%, cost by 84%, and failure points by 80%.
+
+2. **Vision models understand context, not just text.** They read charts, interpret diagrams, understand layout, and reason across visual and textual content. This enables applications that were impossible with text-only models.
+
+3. **Audio processing is production-ready.** Whisper and Realtime APIs provide sub-second transcription with <10% WER. Meeting assistants, voice interfaces, and call analysis are deployable today.
+
+4. **Video understanding is emerging but usable.** Frame extraction + vision models works for short clips. Native video models (Gemini) handle full videos. Choose based on video length and analysis depth needed.
+
+5. **Cross-modal search enables new retrieval patterns.** CLIP embeddings let you search for images using text, or find related content across modalities. This is powerful for document management and content discovery.
+
+6. **Structured output is essential for multimodal processing.** Pydantic validation on extracted data prevents silent corruption. Always validate multimodal outputs before downstream processing.
+
+7. **Image generation is a product feature, not a novelty.** Marketing content, product mockups, and data visualization generation are practical applications with clear ROI.
+
+8. **Cost optimization for multimodal follows the same patterns.** Route simple classification to cheap models, use batch processing for high volume, cache repeated extractions, and use smaller models for straightforward tasks.
+
+9. **Test multimodal systems with domain-specific datasets.** Generic benchmarks do not capture your document types, image quality, or accuracy requirements. Build golden datasets of your actual documents.
+
+10. **Fallback strategies are critical.** When a vision model fails on a complex document, fall back to a specialized OCR service. When an audio model fails on noisy audio, fall back to a different transcription model. Resilience requires redundancy.
+
+---
+
+## 18.9 Further Reading
+
+- **"Deep Learning" by Ian Goodfellow, Yoshua Bengio, and Aaron Courville** — Chapter 9 (Convolutional Networks) provides the foundation for understanding vision model architectures.
+
+- **CLIP Paper (Radford et al., 2021)** — "Learning Transferable Visual Models From Natural Language Supervision" — The foundational paper on cross-modal embeddings.
+
+- **OpenAI Vision API Documentation** (platform.openai.com/docs/guides/vision) — Comprehensive guide to using GPT-4o for image understanding, including best practices for document processing.
+
+- **Google Gemini Multimodal Documentation** (ai.google.dev/docs) — Guide to Gemini's native video, audio, and image understanding capabilities.
+
+- **Whisper Paper (Radford et al., 2022)** — "Robust Speech Recognition via Large-Scale Weak Supervision" — The paper behind OpenAI's speech-to-text model.
+
+- **"Computer Vision: Algorithms and Applications" by Richard Szeliski** — Comprehensive textbook covering image processing, feature detection, and recognition algorithms.
+
+- **Anthropic Vision Documentation** (docs.anthropic.com/en/docs/build-with-claude/vision) — Guide to Claude's image understanding capabilities, including document processing best practices.
+
+- **"Multimodal Machine Learning: A Survey and Taxonomy" by Tbalasubramanian et al.** — Academic survey of multimodal learning approaches, covering fusion strategies, alignment, and transfer.
+
+- **Azure AI Vision Documentation** (learn.microsoft.com/azure/ai-services/computer-vision) — Production-grade OCR, image analysis, and document intelligence services.
+
+- **"Document AI" by Google Cloud** (cloud.google.com/document-ai) — Enterprise document processing platform with multimodal extraction capabilities.

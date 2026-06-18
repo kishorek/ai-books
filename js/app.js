@@ -115,8 +115,13 @@ themeToggle?.addEventListener('click', () => {
   document.documentElement.setAttribute('data-theme', next);
   localStorage.setItem('theme', next);
   initMermaid();
-  // Re-render mermaid in current article
+  // Re-render mermaid with new theme — clear existing SVGs first
   if (currentBook && currentChapter) {
+    article.querySelectorAll('.mermaid svg').forEach(svg => {
+      const div = svg.parentElement;
+      const original = div.getAttribute('data-original');
+      if (original) div.textContent = original;
+    });
     renderMermaidDiagrams();
   }
 });
@@ -199,6 +204,15 @@ async function loadChapter(bookKey, chapterSlug) {
     // Parse markdown
     article.innerHTML = marked.parse(md);
 
+    // Convert mermaid code blocks to div.mermaid for rendering
+    article.querySelectorAll('code.language-mermaid').forEach(code => {
+      const pre = code.parentElement;
+      const div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = code.textContent;
+      pre.replaceWith(div);
+    });
+
     // Render mermaid
     await renderMermaidDiagrams();
 
@@ -217,7 +231,13 @@ async function renderMermaidDiagrams() {
 
   for (let i = 0; i < mermaidDivs.length; i++) {
     const div = mermaidDivs[i];
+    // Skip if already rendered as SVG
+    if (div.querySelector('svg')) continue;
+
     const graphDefinition = div.textContent.trim();
+    if (!graphDefinition) continue;
+    // Store original for theme toggle re-render
+    div.setAttribute('data-original', graphDefinition);
     const id = `mermaid-${++mermaidCounter}`;
 
     try {

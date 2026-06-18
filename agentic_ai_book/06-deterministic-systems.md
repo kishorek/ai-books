@@ -295,7 +295,7 @@ Modern LLM APIs offer three levels of structured output enforcement, each with d
 
 ```python
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5.4",
     messages=[{"role": "user", "content": "Extract the customer name and email from: 'John Smith, john@example.com'"}],
     response_format={"type": "json_object"}
 )
@@ -316,7 +316,7 @@ schema = {
     "required": ["name", "email", "confidence"]
 }
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5.4",
     messages=[{"role": "user", "content": f"Extract info: {text}"}],
     response_format={"type": "json_schema", "json_schema": {"name": "customer", "schema": schema}}
 )
@@ -457,7 +457,7 @@ Structured outputs carry a measurable cost premium over free-form generation:
 | JSON schema enforced | 250 | 140 | 500ms | $0.0010 | <1% (schema mismatch) |
 | Function calling | 300 | 130 | 480ms | $0.0011 | <0.5% |
 
-*Based on GPT-4o pricing as of Q1 2025: $2.50/1M input tokens, $10.00/1M output tokens.*
+*Based on GPT-5.4 pricing as of Q2 2026: $2.50/1M input tokens, $15.00/1M output tokens.*
 
 The 12-37% cost increase for structured outputs is almost always justified by the elimination of downstream parsing failures. A single parsing failure in a production pipeline can cascade into retries, data corruption, and customer-facing errors—costs that dwarf the incremental token spend.
 
@@ -467,7 +467,7 @@ The schema itself consumes input tokens on every call. For schemas with dozens o
 2. **Nest schemas selectively**: Only expose required fields at the top level; use `$defs` for reusable sub-schemas.
 3. **Cache schema definitions**: Use JSON Schema `$defs` to avoid repeating type definitions across endpoints.
 4. **Batch small extractions**: Combine multiple small extractions into a single structured call. Instead of 5 calls extracting one field each, make 1 call extracting all 5 fields.
-5. **Use smaller models for simple schemas**: GPT-4o-mini or Claude Haiku for simple extractions; reserve GPT-4o/Claude Sonnet for complex reasoning.
+5. **Use smaller models for simple schemas**: GPT-5.4 mini or Claude Haiku 4.5 for simple extractions; reserve GPT-5.4/Claude Sonnet 4.6 for complex reasoning.
 
 ### 6.2.6 Schema Evolution and Versioning
 
@@ -712,7 +712,7 @@ AWS Step Functions provides serverless workflow orchestration with built-in inte
       "Type": "Task",
       "Resource": "arn:aws:bedrock:us-east-1:123456789:invoke-model",
       "Parameters": {
-        "modelId": "anthropic.claude-3-sonnet",
+        "modelId": "anthropic.claude-sonnet-4-6-20250514",
         "body": {"symptoms.$": "$.symptoms"}
       },
       "ResultPath": "$.classification",
@@ -1109,7 +1109,7 @@ class PatientTriageWorkflow:
 
 | Component | Per-Interaction Cost | Monthly Cost | Notes |
 |-----------|---------------------|-------------|-------|
-| Bedrock Claude Haiku (classification) | $0.0008 | $192 | ~200 input tokens, ~50 output tokens |
+| Bedrock Claude Haiku 4.5 (classification) | $0.0008 | $192 | ~200 input tokens, ~50 output tokens |
 | Lambda (vitals assessment) | $0.00002 | $4.80 | Rule engine, no LLM |
 | Lambda (routing logic) | $0.00001 | $2.40 | Pure deterministic |
 | DynamoDB (state read/write) | $0.0001 | $24.00 | 2 reads + 2 writes per interaction |

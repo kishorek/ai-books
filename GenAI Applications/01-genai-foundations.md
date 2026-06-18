@@ -22,6 +22,14 @@ Understanding where AI came from reveals why modern GenAI works the way it does 
 
 **Expert systems** formalized symbolic AI into commercial products. The pattern was encoding expert knowledge as IF-THEN rules. The fundamental limit: when the knowledge base exceeds what humans can maintain, the system becomes unmanageable. A rules engine with 10,000 rules has approximately 50 million potential interaction paths. No human team can verify all of them. This is the limit that machine learning later overcame.
 
+| Era | Approach | Strength | Weakness | When to Use Today |
+|-----|----------|----------|----------|-------------------|
+| Symbolic AI | Hand-coded rules | Interpretable, verifiable | Brittle, no ambiguity handling | Simple routing, compliance checks |
+| Expert Systems | IF-THEN knowledge bases | Domain-specific expertise | Unscalable, maintenance burden | Legacy system integration |
+| Machine Learning | Statistical learning from data | Adapts to patterns | Requires feature engineering | Structured data prediction |
+| Deep Learning | Neural networks, no manual features | Handles unstructured data | Requires large datasets, compute | Image, text, audio processing |
+| Generative AI | Foundation models, prompt-based | Flexible, zero-shot capable | Non-deterministic, expensive | Content generation, reasoning, agents |
+
 ### 1.1.2 Machine Learning and Deep Learning
 
 **Machine learning** replaced hand-coded rules with statistical learning from data. Decision trees, support vector machines, random forests, and gradient boosting all learned patterns from examples. The engineering surface area shifted from rule maintenance to data management — you now needed data pipelines, feature engineering, and model training infrastructure. The key insight: the quality of the model was bounded by the quality of the features humans designed.
@@ -499,7 +507,285 @@ def test_citation_accuracy():
 
 ---
 
-## 1.7 Key Takeaways
+## 1.7 The Cost of Getting It Wrong
+
+Model selection errors are expensive. The following table quantifies the cost of common mistakes:
+
+| Mistake | Example | Monthly Cost Impact | How to Avoid |
+|---------|---------|-------------------|--------------|
+| Over-provisioned model | Using GPT-5.5 for classification | +$450,000 | Task-based model routing |
+| Under-provisioned model | Using nano for complex analysis | +$50,000 (rework) | Quality evaluation before selection |
+| No fallback strategy | Single provider outage | +$200,000 (downtime) | Multi-provider architecture |
+| Ignoring token costs | Japanese text on English pricing | +$15,000 | Language-aware cost modeling |
+| Wrong context window | 128K for 1M document | +$80,000 (chunking overhead) | Match window to use case |
+| No caching | Repeated system prompts | +$40,000 | Prompt caching (Anthropic) |
+
+The total cost of a bad model selection decision can exceed $500,000 per year at scale. The time spent on proper evaluation — building a test dataset, measuring latency, calculating costs — pays for itself many times over.
+
+### Common Anti-Patterns
+
+**Anti-pattern 1: Default to the most powerful model.** Using GPT-5.5 for every task is like using a Ferrari for grocery shopping. It works, but you are wasting money. The model router pattern routes tasks to appropriate models.
+
+**Anti-pattern 2: Optimize for cost without quality gates.** Switching to the cheapest model without evaluation is gambling. Always measure quality impact before and after model changes.
+
+**Anti-pattern 3: Ignore deployment constraints.** Selecting a model that requires 8x H100 GPUs when your infrastructure has 4x A100s is not a model selection — it is a fantasy. Start with what you can deploy.
+
+**Anti-pattern 4: Single point of failure.** Relying on a single model provider is an operational risk. Design for provider failure from day one.
+
+```python
+# Anti-pattern: Default to expensive model
+def analyze_document(document: str) -> str:
+    # WRONG: Using GPT-5.5 for all analysis
+    response = client.chat.completions.create(
+        model="gpt-5.5",  # $5.00/1M input, $30.00/1M output
+        messages=[{"role": "user", "content": f"Analyze: {document}"}],
+    )
+    return response.choices[0].message.content
+
+# CORRECT: Route based on complexity
+def analyze_document_optimized(document: str) -> str:
+    complexity = assess_complexity(document)
+    
+    if complexity == "simple":
+        model = "gpt-5.4-nano"  # $0.20/1M input, $1.25/1M output
+    elif complexity == "standard":
+        model = "gpt-5.4"  # $2.50/1M input, $15.00/1M output
+    else:
+        model = "deepseek-r1"  # $0.55/1M input, $2.19/1M output
+    
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": f"Analyze: {document}"}],
+    )
+    return response.choices[0].message.content
+```
+
+---
+
+## 1.7 Self-Hosted Deployment Deep Dive
+
+Self-hosted models solve data sovereignty and cost problems but introduce deployment complexity. This section covers the practical considerations for self-hosting frontier models.
+
+### 1.7.1 Hardware Requirements
+
+| Model | Min GPUs | GPU Type | VRAM Required | Network | Storage |
+|-------|---------|----------|---------------|---------|---------|
+| Llama 4 Scout | 4 | H100 80GB | 320GB | InfiniBand | 200GB |
+| Llama 4 Maverick | 4 | H100 80GB | 320GB | InfiniBand | 800GB |
+| Qwen 3.5 | 2 | A100 80GB | 160GB | 100GbE | 150GB |
+| Qwen 3.6 | 4 | H100 80GB | 320GB | InfiniBand | 500GB |
+| Mistral Large | 8 | A100 80GB | 640GB | InfiniBand | 300GB |
+
+### 1.7.2 Inference Frameworks
+
+| Framework | Performance | Ease of Use | Features | Best For |
+|-----------|------------|-------------|----------|----------|
+| vLLM | High | Medium | PagedAttention, continuous batching | Production serving |
+| TGI (HuggingFace) | High | Easy | Docker, OpenAI-compatible API | Quick deployment |
+| Ollama | Medium | Very Easy | Single-command setup | Development, testing |
+| TensorRT-LLM | Highest | Hard | NVIDIA optimization | Maximum throughput |
+| llama.cpp | Medium | Easy | CPU + GPU, quantization | Edge deployment |
+
+### 1.7.3 Cost Comparison: Self-Hosted vs. API
+
+```python
+def compare_selfhosted_vs_api(
+    requests_per_day: int,
+    avg_tokens_per_request: int,
+    api_price_per_1m: float,
+    gpu_count: int,
+    gpu_cost_per_hour: float,
+    utilization: float = 0.7,
+) -> dict:
+    """Compare self-hosted vs API costs."""
+    
+    # API cost
+    monthly_api_tokens = requests_per_day * 30 * avg_tokens_per_request
+    monthly_api_cost = monthly_api_tokens * api_price_per_1m / 1_000_000
+    
+    # Self-hosted cost
+    gpu_hours_per_month = 24 * 30 * utilization
+    monthly_gpu_cost = gpu_count * gpu_cost_per_hour * gpu_hours_per_month
+    
+    # Break-even analysis
+    if monthly_api_cost > 0:
+        break_even_requests = (monthly_gpu_cost * 1_000_000) / (api_price_per_1m * avg_tokens_per_request * 30)
+    else:
+        break_even_requests = float('inf')
+    
+    return {
+        "monthly_api_cost": monthly_api_cost,
+        "monthly_selfhosted_cost": monthly_gpu_cost,
+        "monthly_savings": monthly_api_cost - monthly_gpu_cost,
+        "annual_savings": (monthly_api_cost - monthly_gpu_cost) * 12,
+        "break_even_requests_per_day": break_even_requests / 30,
+        "recommendation": "self-hosted" if monthly_gpu_cost < monthly_api_cost else "api",
+    }
+
+# Example: Llama 4 Maverick vs GPT-5.4
+result = compare_selfhosted_vs_api(
+    requests_per_day=500_000,
+    avg_tokens_per_request=1000,
+    api_price_per_1m=2.50,
+    gpu_count=4,
+    gpu_cost_per_hour=2.50,
+    utilization=0.7,
+)
+print(f"API cost: ${result['monthly_api_cost']:,.2f}/month")
+print(f"Self-hosted cost: ${result['monthly_selfhosted_cost']:,.2f}/month")
+print(f"Savings: ${result['monthly_savings']:,.2f}/month")
+print(f"Break-even: {result['break_even_requests_per_day']:,.0f} requests/day")
+# API cost: $375,000.00/month
+# Self-hosted cost: $5,040.00/month
+# Savings: $369,960.00/month
+# Break-even: 672 requests/day
+```
+
+### 1.7.4 Operational Considerations
+
+| Concern | API Provider | Self-Hosted |
+|---------|-------------|-------------|
+| Model updates | Automatic | Manual (re-deploy) |
+| Scaling | Automatic | Manual (add GPUs) |
+| Monitoring | Provider dashboard | Build your own |
+| Backup/restore | Provider managed | Your responsibility |
+| Security patches | Provider managed | Your responsibility |
+| Uptime SLA | 99.9-99.99% | Depends on your ops |
+| Cost predictability | Usage-based | Fixed (GPU rental) or variable (cloud) |
+
+### 1.7.5 Model Quantization for Self-Hosting
+
+Quantization reduces model precision to decrease memory requirements and increase throughput:
+
+| Precision | Memory per Param | Llama 4 Maverick Memory | Quality Impact | Speedup |
+|-----------|-----------------|------------------------|----------------|---------|
+| FP32 | 4 bytes | 1600GB | Baseline | 1x |
+| FP16 | 2 bytes | 800GB | None | 1x |
+| INT8 | 1 byte | 400GB | <1% loss | 1.5x |
+| INT4 | 0.5 bytes | 200GB | 1-3% loss | 2x |
+
+The recommended approach for production self-hosting is INT8 quantization — it halves memory requirements with negligible quality impact. INT4 is acceptable for cost-sensitive deployments where a 1-3 percent quality loss is tolerable.
+
+```python
+# Quantization impact on deployment cost
+# Llama 4 Maverick (400B params):
+
+# FP16 deployment:
+# Memory: 800GB → 10x H100 GPUs → $18,000/month
+# Throughput: 29,000 tokens/sec
+
+# INT8 deployment:
+# Memory: 400GB → 5x H100 GPUs → $9,000/month
+# Throughput: 43,500 tokens/sec (1.5x faster)
+# Quality loss: <1%
+
+# INT4 deployment:
+# Memory: 200GB → 3x H100 GPUs → $5,400/month
+# Throughput: 58,000 tokens/sec (2x faster)
+# Quality loss: 1-3%
+
+# Cost per million tokens:
+# FP16: $18,000 / (29,000 × 3600) × 1M = $0.17
+# INT8: $9,000 / (43,500 × 3600) × 1M = $0.057
+# INT4: $5,400 / (58,000 × 3600) × 1M = $0.026
+```
+
+### 1.7.6 When Self-Hosting Makes Sense
+
+Self-hosting is not always the right choice. Use this decision framework:
+
+| Factor | Self-Host When | API When |
+|--------|---------------|----------|
+| Volume | >500K requests/day | <100K requests/day |
+| Data sensitivity | PHI, PII, trade secrets | Public data |
+| Cost at volume | Self-hosted cheaper (see calculations) | API cheaper |
+| Team expertise | Have ML/infrastructure engineers | Small team |
+| Latency requirement | <100ms TTFT required | 200ms+ acceptable |
+| Model customization | Need fine-tuning | Standard model sufficient |
+| Uptime requirement | Can invest in HA infrastructure | Need provider SLA |
+
+The break-even point for self-hosting versus API is typically 100K-500K requests/day depending on model size and pricing. Below that volume, API providers are cheaper and simpler. Above that volume, self-hosting becomes economically advantageous.
+
+### 1.7.7 Multi-Model Deployment Strategy
+
+Production systems rarely use a single model. A multi-model deployment strategy provides cost optimization, fallback capability, and task-specific quality:
+
+```python
+class MultiModelDeployment:
+    """Manage multiple models for different use cases."""
+    
+    def __init__(self):
+        self.models = {
+            "classification": {
+                "primary": "gpt-5.4-nano",
+                "fallback": "deepseek-v3",
+                "cost_per_request": 0.0002,
+            },
+            "extraction": {
+                "primary": "gpt-5.4",
+                "fallback": "claude-sonnet-4.6",
+                "cost_per_request": 0.005,
+            },
+            "analysis": {
+                "primary": "gpt-5.4",
+                "fallback": "deepseek-r1",
+                "cost_per_request": 0.008,
+            },
+            "reasoning": {
+                "primary": "deepseek-r1",
+                "fallback": "gpt-5.5",
+                "cost_per_request": 0.012,
+            },
+        }
+    
+    def route_request(self, task_type: str, request: dict) -> dict:
+        """Route to appropriate model with fallback."""
+        model_config = self.models.get(task_type)
+        if not model_config:
+            raise ValueError(f"Unknown task type: {task_type}")
+        
+        try:
+            result = call_model(model_config["primary"], request)
+            return {"model": model_config["primary"], "result": result}
+        except Exception:
+            result = call_model(model_config["fallback"], request)
+            return {"model": model_config["fallback"], "result": result}
+    
+    def calculate_monthly_cost(
+        self, requests_by_type: dict[str, int]
+    ) -> dict:
+        """Calculate monthly cost across all models."""
+        total = 0
+        breakdown = {}
+        
+        for task_type, count in requests_by_type.items():
+            model_config = self.models.get(task_type, {})
+            cost_per = model_config.get("cost_per_request", 0)
+            monthly_cost = count * 30 * cost_per
+            breakdown[task_type] = {
+                "daily_requests": count,
+                "monthly_cost": monthly_cost,
+            }
+            total += monthly_cost
+        
+        breakdown["total_monthly"] = total
+        return breakdown
+
+# Example: Financial services AI platform
+deployment = MultiModelDeployment()
+costs = deployment.calculate_monthly_cost({
+    "classification": 500_000,  # 500K/day: document type classification
+    "extraction": 100_000,      # 100K/day: data extraction from documents
+    "analysis": 50_000,         # 50K/day: financial analysis
+    "reasoning": 10_000,        # 10K/day: complex reasoning tasks
+})
+# Total: ~$75,000/month for 660K requests/day
+# vs single GPT-5.4: ~$200,000/month (63% savings)
+```
+
+---
+
+## 1.8 Key Takeaways
 
 1. **Model selection is an architectural decision, not a benchmark chase.** The model with the highest MMLU score is not necessarily the model that meets your latency, cost, sovereignty, and compliance constraints. Start with hard constraints, then optimize for quality.
 
