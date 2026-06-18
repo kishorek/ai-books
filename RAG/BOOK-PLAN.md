@@ -1,51 +1,53 @@
-# Book Writing Plan: Agentic AI
+# Book Writing Plan: Enterprise RAG — From Fundamentals to Production
 
 ## Target Audience
-Senior/Principal GenAI Architects preparing for Staff+ roles or building production AI systems.
+
+Senior/Principal GenAI Architects designing enterprise-scale knowledge systems. Most engineers know how to build a simple chatbot with embeddings and a vector database. This book covers the entire discipline: information retrieval, search engineering, knowledge management, distributed systems, evaluation, governance, and AI architecture.
 
 ## Writing Quality Standard
 
-Every chapter MUST meet the depth bar demonstrated in `03-multi-agent-design.md`. This means:
+Every chapter MUST meet the following depth bar:
 
 1. **Deep analysis, not surface overviews.** Each concept gets mechanism explanation, concrete examples, quantified trade-offs, and production implications. No topic is just a definition + bullet list.
-2. **Mermaid or ASCII diagrams for every architecture, flow, and system.** If you can draw it, draw it. Diagrams are mandatory for: system architectures, data flows, state machines, decision trees, and any multi-component interaction.
+2. **Mermaid or ASCII diagrams for every architecture, flow, and system.** Diagrams are mandatory for: system architectures, data flows, state machines, decision trees, and any multi-component interaction.
 3. **Quantified trade-offs.** Not "X is faster than Y" but "X handles N requests/second at M cost vs Y handles P at Q." Include token cost calculations, latency numbers, throughput ceilings, and scaling formulas where applicable.
 4. **Enterprise constraint decision tables.** Every chapter with architectural choices must include a table mapping specific business/regulatory/operational constraints to recommended approaches.
-5. **Concrete case studies.** Each chapter must include at least one real-world scenario (supply chain, customer resolution, healthcare, finance) that grounds the concepts in a tangible system.
-6. **Per-topology analysis.** Where relevant, analyse how the topic manifests differently in hierarchical, P2P, and hybrid topologies. Do not just describe one approach — compare all three.
-7. **Code-level detail when relevant.** Include pseudocode, configuration snippets, or API patterns that show what implementation looks like. Not full programs, but enough that an architect knows what the code surface area looks like.
-8. **Web-researched data.** Before writing each chapter, search the web for current benchmarks, framework documentation, pricing, performance numbers, and real-world case studies. Do not rely on training data alone — verify current facts (e.g. latest LangGraph API, Temporal workflow patterns, Kafka throughput benchmarks, LLM pricing). Cite sources inline.
-9. **Code snippets where necessary.** Include actual code (Python, TypeScript, or pseudocode) for: API usage patterns, framework integration examples, configuration templates, state management implementations, and error handling patterns. Every code snippet should be concise (10-40 lines) and demonstrate a single concept. Mark the language with fenced code blocks.
+5. **Concrete case studies.** Each chapter must include at least one real-world scenario (enterprise search, document intelligence, customer support, healthcare) that grounds the concepts in a tangible system.
+6. **Code-level detail when relevant.** Include pseudocode, configuration snippets, or API patterns that show what implementation looks like. Not full programs, but enough that an architect knows what the code surface area looks like.
+7. **Web-researched data.** Before writing each chapter, search the web for current benchmarks, framework documentation, pricing, performance numbers, and real-world case studies. Do not rely on training data alone — verify current facts. Cite sources inline.
+8. **Code snippets where necessary.** Include actual code (Python, TypeScript, or pseudocode) for: API usage patterns, framework integration examples, configuration templates, retrieval implementations, and error handling patterns. Every code snippet should be concise (10-40 lines) and demonstrate a single concept. Mark the language with fenced code blocks.
 
 ## Coverage Requirements
 
 Every chapter must address the following enterprise concerns when relevant:
-1. **State management per topology** — how state is owned, shared, and persisted in hierarchical vs P2P vs hybrid
-2. **Token consumption and context bloat** — how context window usage scales with agent count, topology, and message patterns
-3. **Horizontal scalability** — what limits horizontal scaling in each architecture and how to address it
+1. **Retrieval quality** — precision, recall, relevance metrics, and how they degrade at scale
+2. **Token consumption and context bloat** — how context window usage scales with query volume and document count
+3. **Horizontal scalability** — what limits horizontal scaling and how to address it
 4. **Enterprise constraints** — specific regulatory, operational, or business conditions that mandate one approach over another
 5. **Trade-off tables** — structured comparisons with concrete recommendations
 6. **Diagrams** — mermaid or ASCII for every system, flow, and architecture
 
 ## Book Structure
 
-| # | File | Chapter Title | Sections | Est. Words |
-|---|------|---------------|----------|------------|
-| 0 | `00-introduction.md` | Introduction: Why Agentic AI | Scope, who this is for, how to use this book | 3,000 |
-| 1 | `01-foundations.md` | Agentic AI Fundamentals | Agent vs Workflow/Assistant, Single vs Multi Agent, Autonomous vs HITL, Agent Types (Reactive/Proactive/Goal/Planning/Reflection/Self-Correcting). Per-type diagrams, quantified trade-offs, enterprise constraint table. | 10,000 |
-| 2 | `02-agent-architectures.md` | Agent Architectures | ReAct, Plan & Execute, Reflection, ToT, GoT, LATS, Crew, Hierarchical, Networked, Event Driven, Swarm. Per-architecture mechanism, diagram, token cost model, scalability characteristics, comparison matrix. | 12,000 |
-| 3 | `03-multi-agent-design.md` | Multi Agent System Design | Topologies with deep per-topology analysis of state management, token consumption, context bloat, horizontal scalability, enterprise constraint mapping. Case study: supply chain system. Decision framework. | 12,000 |
-| 4 | `04-state-management.md` | Agent State Management | State Types, Storage Patterns, State Techniques. Per-topology state patterns with diagrams. Consistency models (strong, eventual, causal) and implications. Storage selection decision table. Case study: order processing state management. | 10,000 |
-| 5 | `05-context-engineering.md` | Context Engineering | Context Windows, Bloat, Compression, Isolation, Routing, Dynamic Assembly, RAG, Long Term Memory, KG Context, Session Summarization, Advanced topics. Per-topology context propagation diagrams. Token cost modelling. Context window budgeting formulas. | 10,000 |
-| 6 | `06-deterministic-systems.md` | Deterministic AI Systems | Routing Determinism, Structured Outputs, Frameworks. State machine diagrams, FSM diagrams, workflow engine comparison. When to use deterministic vs probabilistic routing. Framework comparison matrix. | 10,000 |
-| 7 | `07-reliability-engineering.md` | Reliability Engineering for Agents | Failure Management, Loop Prevention, Recovery. Per-topology failure modes with diagrams. Circuit breaker patterns, retry budget calculations, recovery flow diagrams. Case study: multi-agent failure recovery. | 10,000 |
-| 8 | `08-distributed-systems.md` | Distributed Systems for AI | Messaging Systems, Patterns, Challenges. Message flow diagrams, event sourcing diagrams, saga pattern diagrams. Kafka vs RabbitMQ vs SQS comparison. Idempotency implementation patterns. | 10,000 |
-| 9 | `09-workflow-orchestration.md` | Enterprise Workflow Orchestration | Engines, Concepts. Engine comparison matrix. Durable execution flow diagrams. Checkpoint/recovery diagrams. When to use Temporal vs LangGraph vs Step Functions. | 8,000 |
-| 10 | `10-scalability.md` | Scalability Engineering | Scaling, Optimization. Per-topology scalability limits with formulas. Token cost optimization strategies. Scaling calculation examples. Caching architecture diagrams. | 9,000 |
-| 11 | `11-governance.md` | Enterprise AI Governance | Governance, Enterprise Controls. Audit trail architecture diagrams. RBAC/ABAC implementation patterns. Compliance decision table. PII handling flow diagrams. | 8,000 |
-| 12 | `12-llmops-agentops.md` | LLMOps and AgentOps | Observability, Evaluation, Monitoring. OpenTelemetry integration diagrams. Evaluation framework architecture. Cost monitoring dashboards. Drift detection patterns. | 8,000 |
-| 13 | `13-advanced-patterns.md` | Advanced Enterprise Agent Topics | Advanced Patterns, Advanced Memory, Research. MCP/A2A protocol diagrams. Knowledge graph memory architecture. Agent marketplace design. | 9,000 |
-| 14 | `14-learning-roadmap.md` | Learning Roadmap and Career Guide | The 17-topic learning sequence, study plan, interview prep strategy, recommended resources. Topic dependency graph. Study timeline. | 5,000 |
+| # | File | Domain Title | Sections | Est. Words |
+|---|------|--------------|----------|------------|
+| 0 | `00-introduction.md` | Introduction | Scope, who this is for, how to use this book, recommended learning sequence | 3,000 |
+| 1 | `01-rag-fundamentals.md` | RAG Fundamentals | Core Concepts (What is RAG, Why RAG instead of Fine Tuning, Parametric vs Non-Parametric Memory, Knowledge Retrieval Lifecycle, Retrieval Pipeline Architecture, Context Augmentation, Grounded Generation, Hallucination Reduction, Enterprise Knowledge Systems, Retrieval Quality Metrics), Types of RAG (Naive, Advanced, Agentic, Hybrid, Graph, Multimodal, Knowledge Graph, Adaptive, Corrective, Self-Reflective). Comparison matrix. | 10,000 |
+| 2 | `02-information-retrieval.md` | Information Retrieval Fundamentals | Classical IR (TF-IDF, BM25, Inverted Indexes, Search Ranking, Query Expansion, Query Rewriting, Relevance Scoring, Information Gain, Precision, Recall), Search Systems (Lucene, Solr, Elasticsearch, OpenSearch, Vespa, Coveo), Retrieval Metrics (Precision@K, Recall@K, MRR, NDCG, MAP, Hit Rate). Quantified benchmarks. | 10,000 |
+| 3 | `03-document-processing.md` | Document Processing Pipeline | Ingestion (PDF, Word, Excel, PowerPoint, Web Crawling, API Ingestion), Data Cleaning (OCR Correction, Noise Removal, Boilerplate Removal, Header/Footer Removal, Duplicate Detection, Data Normalization), Parsing (Unstructured, Layout Aware, Table Extraction, Form Extraction, Image Extraction, Metadata Extraction). Pipeline architecture diagrams. | 10,000 |
+| 4 | `04-chunking-strategies.md` | Chunking Strategies | Chunking Techniques (Fixed Size, Sliding Window, Recursive, Semantic, Structure Aware, Hierarchical), Advanced Chunking (Section Based, Topic Based, Heading Aware, Table, Code, Multimodal), Chunk Optimization (Size Selection, Overlap Strategies, Parent Child, Small to Big Retrieval, Context Preservation). Comparison table with retrieval quality metrics. | 10,000 |
+| 5 | `05-embeddings.md` | Embeddings | Fundamentals (Embedding Theory, Vector Space Representation, Similarity Search, Semantic Similarity, Cosine Similarity, Euclidean Distance), Embedding Models (OpenAI, BGE, E5, Voyage AI, Cohere, Jina), Evaluation (Benchmarks, Domain Specific, Multilingual, Fine Tuned, Embedding Drift). Model comparison matrix. | 9,000 |
+| 6 | `06-vector-databases.md` | Vector Databases | Core Concepts (ANN Search, Nearest Neighbor, Vector Indexing, Similarity Search, Metadata Filtering), Databases (Pinecone, Weaviate, Milvus, Qdrant, Chroma, pgvector), Index Types (HNSW, IVF, PQ, Flat, DiskANN), Scaling (Sharding, Replication, Partitioning, HA, Multi Region). Database comparison matrix. | 10,000 |
+| 7 | `07-retrieval-engineering.md` | Retrieval Engineering | Retrieval Strategies (Dense, Sparse, Hybrid, Semantic, Lexical, Metadata), Query Processing (Rewriting, Expansion, Decomposition, Multi Query, HyDE, Step Back Prompting), Advanced Retrieval (Parent Child, Recursive, Multi Hop, Iterative, Adaptive). Architecture diagrams per strategy. | 10,000 |
+| 8 | `08-reranking.md` | Re Ranking Systems | Re Ranking (Cross Encoders, Bi Encoders, Rankers, Relevance Scoring, Candidate Selection), Models (Cohere Rerank, BGE Reranker, Jina Reranker, ColBERT, MonoT5), Optimization (Latency vs Accuracy, Recall, Precision, Ranking Calibration). Comparison table. | 8,000 |
+| 9 | `09-context-engineering-rag.md` | Context Engineering for RAG | Context Construction (Prompt Assembly, Context Selection, Ordering, Compression, Deduplication), Token Optimization (Summarization, Trimming, Fact Extraction, Semantic Compression), Long Context (32K, 128K, 1M Token Systems, Retrieval vs Long Context Tradeoffs). Token budget formulas. | 9,000 |
+| 10 | `10-knowledge-graph-rag.md` | Knowledge Graph RAG | Knowledge Graphs (Graph Databases, Neo4j, RDF, Ontologies, Entity Resolution), Graph RAG (Entity Extraction, Relationship Extraction, Graph Traversal, Subgraph Retrieval, Knowledge Augmentation), Advanced Topics (Semantic Networks, Ontology Design, Graph Embeddings, Hybrid Graph RAG). Architecture diagrams. | 9,000 |
+| 11 | `11-multimodal-rag.md` | Multimodal RAG | Modalities (Text, Images, Audio, Video, Documents), Techniques (Image Embeddings, Vision Language Models, OCR Pipelines, Video Retrieval, Cross Modal Search). Architecture diagrams per modality. | 8,000 |
+| 12 | `12-agentic-rag.md` | Agentic RAG | Agent Driven Retrieval (Retrieval Agents, Planner Agents, Research Agents, Reflection Agents, Verification Agents), Advanced Patterns (Multi Step Retrieval, Tool Based Retrieval, Search Agent Networks, Autonomous Research Systems). Agent architecture diagrams. | 9,000 |
+| 13 | `13-rag-evaluation.md` | RAG Evaluation | Offline Evaluation (Ground Truth Creation, Retrieval Evaluation, Generation Evaluation, Hallucination Evaluation, Benchmark Creation), Metrics (Faithfulness, Relevance, Context Precision, Context Recall, Answer Correctness), Frameworks (RAGAS, DeepEval, TruLens, Phoenix, LangSmith). Evaluation pipeline diagrams. | 10,000 |
+| 14 | `14-production-architecture.md` | Production RAG Architecture | Architecture (Microservices RAG, Event Driven RAG, Streaming RAG, Distributed RAG, Multi Tenant RAG), Performance (Caching, Semantic Cache, Query Cache, Result Cache, Embedding Cache), Reliability (Failover, Retry Strategies, Circuit Breakers, Back Pressure, Rate Limiting). Production architecture diagrams. | 10,000 |
+| 15 | `15-security-governance.md` | Security and Governance | Security (RBAC, ABAC, Document Permissions, Row Level Security, Tenant Isolation), Governance (Audit Trails, Data Lineage, Compliance, GDPR, PII Detection). Threat model diagrams. Compliance decision tables. | 9,000 |
+| 16 | `16-advanced-enterprise-rag.md` | Advanced Enterprise RAG | Advanced Architectures (Federated RAG, Multi Tenant, Cross Organization, Global Knowledge Systems), Research Topics (Corrective RAG, Self RAG, Adaptive RAG, RAPTOR, GraphRAG, Agentic RAG, Memory Augmented, Long Horizon Retrieval), Future Directions (Retrieval Native Models, Memory Systems, AI Knowledge Platforms, Enterprise Knowledge Operating Systems). | 9,000 |
 
 ## Cross-Chapter Coverage Matrix
 
@@ -53,36 +55,24 @@ Each enterprise concern is explicitly addressed across multiple chapters:
 
 | Concern | Covered In | Depth |
 |---------|-----------|-------|
-| **State management per topology** | Ch 03, Ch 04, Ch 07 | Deep — consistency models, storage selection, supervisor vs distributed state |
-| **Token consumption / context bloat** | Ch 03, Ch 05, Ch 10 | Deep — per-agent token budgets, context propagation costs, cost modelling |
-| **Horizontal scalability** | Ch 03, Ch 10 | Deep — bottleneck analysis per topology, scaling formulas, capacity planning |
-| **Enterprise constraint mapping** | Ch 03, Ch 11 | Decision framework: regulatory, operational, business constraints → topology choice |
-| **Failure modes per topology** | Ch 03, Ch 07, Ch 08 | Deep — supervisor SPOF, P2P cascading, hybrid partial failures, recovery strategies |
-
-## Sample Enterprise Constraint Decision Table (Ch 03)
-
-| Constraint | Mandates Hierarchical | Mandates P2P | Mandates Hybrid |
-|-----------|----------------------|--------------|-----------------|
-| Strict audit trail required | ✓ Central supervisor logs all decisions | | |
-| < 100ms inter-agent latency required | | ✓ No coordinator hop | |
-| Regulatory compliance (SOC2, HIPAA) | ✓ Centralised governance | | |
-| 99.99% availability SLA | | ✓ No SPOF | |
-| Dynamic agent fleet (auto-scaling agents) | | ✓ Service discovery | |
-| Multi-team ownership | | | ✓ Supervisor for cross-team, P2P within team |
-| Budget ceiling on token spend | ✓ Context filtering at supervisor | | |
-| Cross-org agent collaboration | | | ✓ Federated pattern |
-| Real-time event processing | | ✓ Event-driven choreography | |
-| Complex long-running workflows | ✓ Durable execution with supervisor | | |
+| **Retrieval quality metrics** | Ch 02, Ch 07, Ch 13 | Deep — Precision@K, Recall@K, NDCG, MRR, evaluation frameworks |
+| **Token consumption / context bloat** | Ch 09, Ch 14 | Deep — context window budgeting, compression strategies, cost modelling |
+| **Horizontal scalability** | Ch 06, Ch 14 | Deep — vector DB sharding, distributed RAG, scaling formulas, capacity planning |
+| **Enterprise constraints** | Ch 15, Ch 16 | Decision framework: regulatory, operational, business constraints → architecture choice |
+| **Security and governance** | Ch 15 | RBAC/ABAC, tenant isolation, GDPR, PII detection, audit trails |
+| **Evaluation and reliability** | Ch 13, Ch 14 | RAGAS, DeepEval, faithfulness metrics, circuit breakers, failover |
+| **Document processing quality** | Ch 03, Ch 04 | OCR, cleaning, chunking strategies — how ingestion quality cascades through the system |
 
 ## Writing Sequence
 
-Phase 1 — Core: Ch 0, 1, 2, 3 (fundamentals → multi-agent)
-Phase 2 — State & Context: Ch 4, 5 (state management, context engineering)
-Phase 3 — Systems: Ch 6, 7, 8, 9 (deterministic, reliability, distributed, orchestration)
-Phase 4 — Ops: Ch 10, 11, 12 (scalability, governance, LLMOps)
-Phase 5 — Advanced: Ch 13, 14 (advanced patterns, roadmap)
+Phase 1 — Foundations: Ch 0, 1, 2 (intro, RAG fundamentals, IR fundamentals)
+Phase 2 — Pipeline: Ch 3, 4, 5, 6 (document processing, chunking, embeddings, vector DBs)
+Phase 3 — Retrieval: Ch 7, 8, 9 (retrieval engineering, reranking, context engineering)
+Phase 4 — Advanced: Ch 10, 11, 12 (knowledge graph, multimodal, agentic RAG)
+Phase 5 — Production: Ch 13, 14, 15, 16 (evaluation, architecture, security, enterprise)
 
 ## File Naming Convention
+
 `XX-topic-name.md` — zero-padded chapter number, kebab-case topic.
 
 ## Chapter Template
@@ -121,12 +111,6 @@ Every chapter follows this template. Not all sections are required — use what 
 |-----------|-----------|-----------|
 | Metric 1 | value | value |
 | Metric 2 | value | value |
-
-## Topology-Specific Analysis (where applicable)
-### Hierarchical: [concern]
-### Peer-to-Peer: [concern]
-### Hybrid: [concern]
-- [Diagram for each topology]
 
 ## Enterprise Constraint Mapping
 Table: specific constraints → recommended approach
@@ -171,14 +155,12 @@ Code snippet standards:
 - Include import/setup context so the snippet is self-contained
 
 ## Estimated Total
-~134,000 words across 15 files (including introduction and roadmap).
+
+~154,000 words across 17 files (including introduction).
 
 ## Current Progress
 
 | # | File | Status |
 |---|------|--------|
-| 0 | `00-introduction.md` | Written |
-| 1 | `01-foundations.md` | Written (needs deepening to meet quality standard) |
-| 2 | `02-agent-architectures.md` | Written (needs deepening to meet quality standard) |
-| 3 | `03-multi-agent-design.md` | Written (meets quality standard) |
-| 4-14 | Remaining chapters | Not started |
+| 0 | `00-introduction.md` | Not started |
+| 1-16 | All chapters | Not started |
