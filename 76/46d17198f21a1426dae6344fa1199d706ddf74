@@ -1,0 +1,179 @@
+agentic_ai_book/05-context-engineering.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-398
+"GenAI Applications/11-agent-frameworks.md"
+  s_1ec04a1d449abd::t_c9bd4a4d51ff1a 3,5,7,9,11,13,15,17,19,21,23-25,27,29,31-37,39,41,43,45,47,49-52,54-64,66,68,70-73,75-81,83-86,88-93,95-102,104-111,113-1083
+"GenAI Applications/13-structured-outputs.md"
+  s_1ec04a1d449abd::t_aaeb831c643b7d 3,5,7,9,11,13,15,17,19,21-28,30,32,34,36,38,40-41,43,45-53,55-58,60-64,66-70,72,74-942
+"GenAI Applications/01-genai-foundations.md"
+  s_78be5a9f8b0695::t_f7dcfc3c9a7669 565-655,786-787
+  s_78be5a9f8b0695::t_837713dd3b0255 510-564,788
+  s_78be5a9f8b0695::t_bc40099fe701a9 25-32
+  s_78be5a9f8b0695::t_9b6c607ce6c488 656-692
+  s_78be5a9f8b0695::t_b924a3cfb4c52a 693-708
+  s_78be5a9f8b0695::t_47d52dbf7a9ee0 709-785
+agentic_ai_book/08-distributed-systems.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-1549
+agentic_ai_book/00-introduction.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-39
+"GenAI Applications/05-llm-apis.md"
+  s_c9f4147d3e3c6c::t_03b189bae8f635 3-4,7-1167,1169-1172,1174-1179,1181-1187,1189,1191-1199,1201-1206,1208-1216,1218,1220,1222,1224,1226,1228,1230,1232,1234,1236,1238,1240,1242,1244,1246,1248,1250,1252,1254,1256,1258,1260,1262,1264
+"GenAI Applications/15-llmops.md"
+  s_1ec04a1d449abd::t_905b1a1458b666 3,5,7,9,11,13,15,17,19-28,30,32,34,36,38-41,43-52,54-61,63-66,68-71,73-83,85-86,88,90-91,93-95,97-101,103-119,121-126,128-132,134-143,145-1114
+"GenAI Applications/07-context-engineering.md"
+  s_c9f4147d3e3c6c::t_1db4a13d0dc62f 3,5,7,9,11,13,15,17,19,21-24,26,28-34,36,38,40,42,44,46,48-56,58,60,62,64-69,71,73,75-82,84,86,88,90,92,94,96-97,99-944
+js/app.js
+  s_8820f6d2ae570d::t_acf69876e5aa74 207-214
+  s_8820f6d2ae570d::t_f02b9749d09042 122-123
+  s_8820f6d2ae570d::t_255e2879a23a07 118,120-121,124
+  s_8820f6d2ae570d::t_f1160f2db89cba 234-236,238
+  s_8820f6d2ae570d::t_d1928749311215 239-240
+"GenAI Applications/08-rag.md"
+  s_c9f4147d3e3c6c::t_af92912d035cd2 3,5,7,9,11,13,15,17,19,21-25,27,29-34,36,38,40-337,341-819,821,823,825,827,829,831,833,835,837,839,841,843
+RAG/14-production-architecture.md
+  s_2aa47dce41d0f0::t_d9fe1c9e2b3d00 3,5,7,9,11,13,15,17,19,21,23-33,35,37,39,41,43-49,51-56,58-62,64-69,71-75,77-84,86-92,94-98,100-101,103-106,108-109,111,113-118,120-1033
+RAG/15-security-governance.md
+  s_2aa47dce41d0f0::t_de955aa2be8110 3,5,7,9,11,13,15,17,19,21,23-31,33,35,37,39,41-43,45-49,51-56,58-65,67-72,74-77,79,81-88,90,92,94-95,97-102,104-106,108-109,111-960
+agentic_ai_book/01-foundations.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-633
+"GenAI Applications/20-future-architectures.md"
+  s_4762e9dedc6e30::t_3779679ea78344 3,5,7,9,11,13,15,17,19-26,28,30,32-39,41,43,45,47,49,51-54,56-59,61-63,65,67,69-72,74-893
+agentic_ai_book/12-llmops-agentops.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-1363
+agentic_ai_book/13-advanced-patterns.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-1119
+"GenAI Applications/12-memory-systems.md"
+  s_1ec04a1d449abd::t_3861efa3c81e00 3,5,7,9,11,13,15,17,19,21-27,29,31,33,35,37,39,41,43-46,48-53,55-64,66-69,71-74,76-78,80-82,84-929
+agentic_ai_book/03-multi-agent-design.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-613
+agentic_ai_book/07-reliability-engineering.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-1427
+agentic_ai_book/02-agent-architectures.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-650
+agentic_ai_book/11-governance.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-1602
+RAG/13-rag-evaluation.md
+  s_2aa47dce41d0f0::t_6342327e46891f 3,5,7,9,11,13,15-43,47-1241,1243,1245,1247,1249,1251,1253,1255,1257,1259,1261,1263,1265,1267,1269,1271,1273,1275,1277
+"GenAI Applications/00-introduction.md"
+  s_78be5a9f8b0695::t_484ce047bcf123 709-733
+  s_78be5a9f8b0695::t_ae4d3c4b49c33f 239-292
+  s_78be5a9f8b0695::t_b8d8baf99ebdda 305-310
+  s_78be5a9f8b0695::t_648b645862e2ec 293-304
+  s_78be5a9f8b0695::t_5764327d1b16e9 95-109
+  s_78be5a9f8b0695::t_ee917076847d94 200-228
+  s_78be5a9f8b0695::t_056aa0bb29dc22 315
+  s_78be5a9f8b0695::t_b37a81a93dfc4a 342-428
+  s_78be5a9f8b0695::t_498bb72b9f4ee2 148-166
+  s_78be5a9f8b0695::t_e19edb6aa03c51 742-780
+  s_78be5a9f8b0695::t_488c38fd690c18 27-51
+  s_78be5a9f8b0695::t_ee52a6996385f3 311-314,317-318
+  s_78be5a9f8b0695::t_b92dc38ad8f771 319-322
+  s_78be5a9f8b0695::t_f27526aa45bfd6 167-193
+  s_78be5a9f8b0695::t_ee355ef8f04294 84-94,132-147,331-340
+  s_78be5a9f8b0695::t_cef7e1b5dc841d 316
+  s_78be5a9f8b0695::t_8db1b80f009663 429-597
+  s_78be5a9f8b0695::t_9e327cfe150551 598-708
+"GenAI Applications/06-building-apps.md"
+  s_c9f4147d3e3c6c::t_55a3389a8b5f02 3,5,7,9,11,13,15,17-19,21-145,149-180,186-224,228-990,992,994,996,998,1000,1002,1004,1006,1008,1010,1012,1014,1016,1018,1020,1022
+"GenAI Applications/03-model-architectures.md"
+  s_78be5a9f8b0695::t_e4d5236faaaf7f 584-663
+  s_78be5a9f8b0695::t_12e04e63e5fd5b 158,246-249,313,461,495,562
+  s_78be5a9f8b0695::t_3d71ecdbdf131a 664-822
+RAG/00-introduction.md
+  s_1c9a2af0a0f02d::t_9ea8089fb15a52 543-604
+  s_1c9a2af0a0f02d::t_86fb0d4f67a86e 685-737
+  s_1c9a2af0a0f02d::t_82c174dfc90f76 432-542
+  s_1c9a2af0a0f02d::t_136ccf2ed6b1ab 628-684
+  s_1c9a2af0a0f02d::t_1366d4ecc86813 738-776
+RAG/16-advanced-enterprise-rag.md
+  s_2aa47dce41d0f0::t_b8c9a63ff6bdeb 3,5,7,9,11,13,15,17,19,21-27,29,31,33,35,37-42,44-47,49-52,54-57,59-63,65-69,71-75,77-83,85-89,91-854
+agentic_ai_book/04-state-management.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-270,272,274,276,278-280,282,284-286,288-293,295-298,300,302,304-305,307,309-324,326-475
+"GenAI Applications/14-evaluation.md"
+  s_1ec04a1d449abd::t_4e699306b7f5e3 3,5-35,39-181,183,185-193,195-217,219,221-225,227-230,232,234,236-244,246-252,254-310,314-957,959,961,963,965,967,969,971,973,975,977,979,981
+"GenAI Applications/17-enterprise-architecture.md"
+  s_4762e9dedc6e30::t_60d757a3fd51e0 3,5,7,9,11,13,15,17,19,21-27,29,31,33,35-42,44,46,48,50,52,54-61,63-70,72-77,79-84,86,88-92,94-1260
+"GenAI Applications/10-ai-agents.md"
+  s_1ec04a1d449abd::t_8225a4c23e75ba 3,5,7,9,11,13,15,17,19,21-28,30,32,34,36,38,40-44,46,48-59,61,63-66,68-70,72-77,79-87,89-91,93-102,104-109,111,113,115,117-123,125-126,128-133,135-1435
+agentic_ai_book/10-scalability.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-1512
+agentic_ai_book/09-workflow-orchestration.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,83,85,87,89,91,93,95,97,99,101,103,105,107-121,123,125-131,133,135,137-143,145,147,149,151-170,173,175,177-181,183,185,188,190-193,195-197,200,202-210,212,214,216,218,220,222,224,226,228,230-253,256-264,266,269-272,274-325,327-384,387,389-397,399,401,403,405,408-461,463-471,473-488,490-507,510-514,516,518,520,522,524,526-528,531-534,538-559,562-571,574-587,590-608,611-626,629-638,640-670,673-682,684-692,694-704,706-709,712-713,716,718,720,722,724-762,764-796,798,800,803-814,816,818-823,826,828-830,832,834,836-899,901-960,964-967,970-973,976-987,990-994,997-1001,1004-1008,1010-1014,1016-1044,1047,1049,1052-1088,1090-1133,1137-1297,1301,1303,1305-1327,1329,1331,1333-1341,1343,1345,1347,1349,1351,1353,1355,1357,1359,1361,1363,1365,1367,1369,1371,1373,1375,1377,1379,1381,1383,1385,1387,1389-1398,1402
+agentic_ai_book/14-learning-roadmap.md
+  s_8820f6d2ae570d::t_54a6ee97701cfe 1-614
+RAG/04-chunking-strategies.md
+  s_1c9a2af0a0f02d::t_abbdff05bbbbc6 3,5,7,9,11,13,15,17,19,21,23,25,27,29,31-38,40,42,44,46,48,50,52-59,61,63-647,651-843,845,847,849,851,853,855,857
+"GenAI Applications/18-multimodal-ai.md"
+  s_4762e9dedc6e30::t_958666cbb20190 3,5,7,9,11,13,15,17,19-25,27,29,31-37,39,41,43,45-1147
+"GenAI Applications/09-tool-calling.md"
+  s_c9f4147d3e3c6c::t_d4e2c98a93ee91 3,5,7,9,11,13,15,17,19,21-43,45,47,49,51,53,55-56,58,60-84,86-92,94-99,101-102,104-118,120,122-127,129,131,133,135-141,143-172,174-179,181,183,185-1037
+RAG/01-rag-fundamentals.md
+  s_1c9a2af0a0f02d::t_923028bec8d3cd 647-794
+"GenAI Applications/16-security.md"
+  s_4762e9dedc6e30::t_56c6885bf56acb 3,5,7,9,11,13,15,17,19-28,30,32,34,36-39,41,43,45,47-54,56,58,60,62,64,66-69,71-1491
+"GenAI Applications/19-production-products.md"
+  s_4762e9dedc6e30::t_c4070e93b839eb 3,5,7,9,11,13,15,17,19-27,29,31,33-42,44,46,48,50,52-68,70,72-77,79,81,83-85,87-90,92-1199
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "7646d17198f21a1426dae6344fa1199d706ddf74",
+  "prompts": {},
+  "sessions": {
+    "s_1c9a2af0a0f02d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_127068614ffe1AW2qwHJa24Z5i",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_1ec04a1d449abd": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_126f2244dffenGaZXdWHlx6vLw",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_2aa47dce41d0f0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1270654d5ffeJ42wOcClFzz4wv",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_4762e9dedc6e30": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_126f20ee1ffe04Wp9kqBhrdOgT",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_78be5a9f8b0695": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_127064264ffeAJzkO1XBXdRlYT",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_8820f6d2ae570d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12445d230ffeXvPD3BZ6EnPbFW",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_c9f4147d3e3c6c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_126f23f11ffe4LeLbiczdnmTSj",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    }
+  }
+}
