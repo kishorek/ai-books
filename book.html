@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Books</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="reader">
+    <nav class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="sidebar-logo">
+          <span class="logo-icon">&#9672;</span>
+          <span class="logo-text">AI Books</span>
+        </a>
+        <button class="sidebar-close" id="sidebar-close">&times;</button>
+      </div>
+      <div class="sidebar-book-title" id="sidebar-book-title"></div>
+      <ul class="sidebar-nav" id="sidebar-nav"></ul>
+    </nav>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <main class="content">
+      <div class="content-header">
+        <button class="menu-btn" id="menu-btn">&#9776;</button>
+        <div class="breadcrumb" id="breadcrumb"></div>
+        <div class="content-actions">
+          <button class="theme-toggle" id="theme-toggle" title="Toggle dark mode">&#9790;</button>
+        </div>
+      </div>
+      <article class="markdown-body" id="article">
+        <div class="loading" id="loading">
+          <div class="loading-spinner"></div>
+          <p>Loading chapter...</p>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
