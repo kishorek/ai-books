@@ -116,18 +116,7 @@ body {
 }
 
 .book-card-accent {
-  height: 4px;
-  background: linear-gradient(90deg, var(--accent), transparent);
-}
-
-.book-card[data-book="agentic"] .book-card-accent {
-  background: linear-gradient(90deg, #f59e0b, #ef4444);
-}
-.book-card[data-book="genai"] .book-card-accent {
-  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
-}
-.book-card[data-book="rag"] .book-card-accent {
-  background: linear-gradient(90deg, #10b981, #06b6d4);
+  display: none;
 }
 
 .book-card-body {
