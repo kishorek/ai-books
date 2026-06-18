@@ -1,0 +1,19 @@
+css/style.css
+  s_8820f6d2ae570d::t_360991fe26ddf7 119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "c0a003125ac70a1f32aecbb9c439dd4400749382",
+  "prompts": {},
+  "sessions": {
+    "s_8820f6d2ae570d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12445d230ffeXvPD3BZ6EnPbFW",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    }
+  }
+}
