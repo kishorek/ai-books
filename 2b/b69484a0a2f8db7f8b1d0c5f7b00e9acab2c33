@@ -1,0 +1,27 @@
+css/style.css
+  s_8820f6d2ae570d::t_7fee63e5ad4173 1-615
+README.md
+  s_8820f6d2ae570d::t_fefcb6c3c5f1cc 1-40
+js/app.js
+  s_8820f6d2ae570d::t_8916f7fd8997dc 1-261
+book.html
+  s_8820f6d2ae570d::t_d249651859bdd8 1-49
+index.html
+  s_8820f6d2ae570d::t_fa54e22a2d9c88 1-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "2bb69484a0a2f8db7f8b1d0c5f7b00e9acab2c33",
+  "prompts": {},
+  "sessions": {
+    "s_8820f6d2ae570d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12445d230ffeXvPD3BZ6EnPbFW",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    }
+  }
+}
