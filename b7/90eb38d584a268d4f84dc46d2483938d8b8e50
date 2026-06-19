@@ -1,0 +1,124 @@
+"GenAI Applications/18-multimodal-ai.md"
+  s_943356dde06e68::t_72df08f6337905 1875
+  s_943356dde06e68::t_97a06bf90df4f6 1798
+  s_943356dde06e68::t_8a28d06c0fae10 1855
+  s_943356dde06e68::t_06d45aaf7c1092 1013,1015-1797
+  s_943356dde06e68::t_ad48dd8a9bb855 1888
+  s_943356dde06e68::t_0b1aa018004f87 1912
+  s_943356dde06e68::t_c0733d0e9328d7 1800
+"GenAI Applications/15-llmops.md"
+  s_d20853769a922d::t_fecb55f64c9ad5 1064-1696
+  s_d20853769a922d::t_37027ba64d78a8 1720
+"GenAI Applications/20-future-architectures.md"
+  s_f8b574102717eb::t_f1524d51e86fdc 1317
+  s_f8b574102717eb::t_8646cc85d6075e 845-1293
+"GenAI Applications/05-llm-apis.md"
+  s_71aaa93b29fb18::t_adc836963016e4 1220-1919
+  s_71aaa93b29fb18::t_a71f0ae3e3c4cc 1943
+"GenAI Applications/19-production-products.md"
+  s_8f354cb4ae30ec::t_736240d6c8d7bb 1995
+  s_8f354cb4ae30ec::t_fa33bce704fdaa 1155-1971
+"GenAI Applications/03-model-architectures.md"
+  s_d20853769a922d::t_090138885ae292 1241-1254
+  s_d20853769a922d::t_c5adf5dbc131e9 1218
+  s_d20853769a922d::t_47e29fb7ccf63f 822-1193
+"GenAI Applications/02-llm-fundamentals.md"
+  s_d20853769a922d::t_80a34d119eee13 845-1087
+  s_d20853769a922d::t_b7678f664c9b3f 1111
+"GenAI Applications/17-enterprise-architecture.md"
+  s_d201e8adc435c5::t_f4869ce7f7225e 1216-1787
+  s_d201e8adc435c5::t_3ec026f2caf6cd 1811
+"GenAI Applications/14-evaluation.md"
+  s_d05bbf11d8cc3f::t_98b67f9202ec15 935-1622
+  s_d05bbf11d8cc3f::t_ed0f650861bf8c 1646
+"GenAI Applications/09-tool-calling.md"
+  s_93ed1d688ca16b::t_7ec0ee1b9045d1 993-1447
+  s_93ed1d688ca16b::t_daa3f71620fad8 1471
+"GenAI Applications/16-security.md"
+  s_d20853769a922d::t_39ed9480f47aa7 1447-2107
+  s_d20853769a922d::t_11825cb6772db3 2131
+  s_d20853769a922d::t_34cd799a645a19 2152-2161
+"GenAI Applications/07-context-engineering.md"
+  s_b454bda137aca2::t_339705e8050df2 900-1420
+  s_b454bda137aca2::t_60c8b4ed7b78c1 1444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "b790eb38d584a268d4f84dc46d2483938d8b8e50",
+  "prompts": {},
+  "sessions": {
+    "s_71aaa93b29fb18": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221dab29ffeibOwDy1mnlLPwa",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_8f354cb4ae30ec": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221d7162ffeien5FkHT1mNdJG",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_93ed1d688ca16b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221d9a26ffeEDBFx8mZtSg9Px",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_943356dde06e68": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221d7c1dffeRBwONMJ3ja8BOr",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_b454bda137aca2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221da12fffeJpECzYCFPsKMTY",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_d05bbf11d8cc3f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221d92b1ffep0Ye80IDvjXXjI",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_d201e8adc435c5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221d8485ffeCPoU61CxQHvA7k",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_d20853769a922d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12228ece6ffegqEVhybtFP52tu",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_f8b574102717eb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1221d67b3ffelAljdOEcdEHap2",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    }
+  }
+}
