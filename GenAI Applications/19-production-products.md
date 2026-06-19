@@ -1152,7 +1152,823 @@ class TestEnterpriseSearch:
 
 ---
 
-## 19.9 Key Takeaways
+## 19.9 Asynchronous Chunked Streaming & UI State Sync
+
+Modern GenAI applications rarely produce a single, monolithic response. A code-generation assistant might stream syntax-highlighted code, update a diff viewer, populate a file tree, and refresh linter warnings — all simultaneously from a single model response. Each downstream consumer expects chunked, incremental updates delivered over a persistent connection. Designing the network protocol layer for this pattern requires careful attention to message structure, transport selection, and UI state reconciliation.
+
+### 19.9.1 Transport Selection: WebSocket vs. SSE
+
+The choice between WebSockets and Server-Sent Events (SSE) determines the fundamental capabilities of the streaming layer.
+
+| Criterion | WebSocket | SSE |
+|-----------|-----------|-----|
+| Direction | Bidirectional | Unidirectional (server to client) |
+| Protocol | `ws://` / `wss://` | HTTP/1.1 or HTTP/2 |
+| Reconnection | Manual implementation required | Automatic built-in retry |
+| Binary data | Native support | Text only (base64 overhead) |
+| Firewall friendliness | Often blocked by corporate proxies | Uses standard HTTP ports |
+| Connection limit | One per domain (HTTP/1.1) | Six per domain (HTTP/1.1), unlimited (HTTP/2) |
+| Complexity | Higher (frame handling, ping/pong) | Lower (event stream) |
+| Backpressure | Client can send signals to server | No native mechanism |
+
+**Rule of thumb:** Use SSE for unidirectional model output (text generation, status updates). Use WebSocket when the client needs to send messages back during generation (streaming tool calls, user interrupts, collaborative editing cursors).
+
+For applications requiring bidirectional communication during generation — such as a code assistant that accepts user clarifications mid-stream — WebSocket is the only viable option. For simpler text-generation UIs, SSE reduces operational complexity and integrates cleanly with HTTP load balancers.
+
+### 19.9.2 Chunked Message Protocol Design
+
+Regardless of transport, the message protocol must encode enough metadata for the client to route each chunk to the correct UI component. A well-designed protocol uses JSON messages with sequence IDs, mutation types, and content payloads.
+
+```python
+import asyncio
+import json
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, AsyncIterator, Optional
+
+
+class MutationType(Enum):
+    TEXT_APPEND = "text_append"
+    CODE_HIGHLIGHT = "code_highlight"
+    CHART_UPDATE = "chart_update"
+    FORM_FIELD = "form_field"
+    STATUS_UPDATE = "status_update"
+    THINKING_STEP = "thinking_step"
+    ERROR = "error"
+    DONE = "done"
+
+
+@dataclass
+class StreamChunk:
+    sequence_id: int
+    mutation_type: MutationType
+    session_id: str
+    payload: dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+    parent_sequence_id: Optional[int] = None  # For out-of-order reconciliation
+    checksum: Optional[str] = None            # For deduplication
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "seq": self.sequence_id,
+            "type": self.mutation_type.value,
+            "session": self.session_id,
+            "payload": self.payload,
+            "ts": self.timestamp,
+            "parent": self.parent_sequence_id,
+            "cksum": self.checksum,
+        })
+
+    @classmethod
+    def from_json(cls, raw: str) -> "StreamChunk":
+        data = json.loads(raw)
+        return cls(
+            sequence_id=data["seq"],
+            mutation_type=MutationType(data["type"]),
+            session_id=data["session"],
+            payload=data["payload"],
+            timestamp=data.get("ts", 0.0),
+            parent_sequence_id=data.get("parent"),
+            checksum=data.get("cksum"),
+        )
+
+
+class ChunkedStreamingProtocol:
+    """Server-side protocol handler for chunked streaming responses.
+
+    Manages sequence numbering, message framing, and transport abstraction.
+    """
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self._sequence_counter = 0
+        self._send_lock = asyncio.Lock()
+
+    async def send_chunk(
+        self,
+        mutation_type: MutationType,
+        payload: dict[str, Any],
+        transport: AsyncIterator[str],
+        parent_sequence_id: Optional[int] = None,
+    ) -> StreamChunk:
+        """Frame and send a single chunk over the transport."""
+        async with self._send_lock:
+            self._sequence_counter += 1
+            chunk = StreamChunk(
+                sequence_id=self._sequence_counter,
+                mutation_type=mutation_type,
+                session_id=self.session_id,
+                payload=payload,
+                parent_sequence_id=parent_sequence_id,
+            )
+
+        await transport.send(chunk.to_json())
+        return chunk
+
+    async def stream_text_response(
+        self,
+        text_iterator: AsyncIterator[str],
+        transport: AsyncIterator[str],
+    ) -> list[StreamChunk]:
+        """Stream a text response, buffering into line-delimited chunks.
+
+        Each yielded string from text_iterator is accumulated and flushed
+        as a TEXT_APPEND chunk when a newline boundary is reached or the
+        buffer exceeds 512 characters.
+        """
+        buffer = ""
+        sent_chunks: list[StreamChunk] = []
+
+        async for token in text_iterator:
+            buffer += token
+
+            # Flush on newline boundary or large buffer
+            while "\n" in buffer or len(buffer) > 512:
+                if "\n" in buffer:
+                    split_idx = buffer.index("\n") + 1
+                else:
+                    split_idx = 512
+
+                chunk_text = buffer[:split_idx]
+                buffer = buffer[split_idx:]
+
+                chunk = await self.send_chunk(
+                    MutationType.TEXT_APPEND,
+                    {"text": chunk_text},
+                    transport,
+                )
+                sent_chunks.append(chunk)
+
+        # Flush remaining buffer
+        if buffer:
+            chunk = await self.send_chunk(
+                MutationType.TEXT_APPEND,
+                {"text": buffer},
+                transport,
+            )
+            sent_chunks.append(chunk)
+
+        # Send completion signal
+        done_chunk = await self.send_chunk(
+            MutationType.DONE,
+            {"total_chunks": len(sent_chunks)},
+            transport,
+        )
+        sent_chunks.append(done_chunk)
+
+        return sent_chunks
+
+    async def stream_multi_mutation(
+        self,
+        mutations: AsyncIterator[tuple[MutationType, dict[str, Any]]],
+        transport: AsyncIterator[str],
+    ) -> list[StreamChunk]:
+        """Route heterogeneous mutations to a single transport.
+
+        Use this when the model response triggers different UI updates:
+        code blocks, chart data, form field suggestions, etc.
+        """
+        sent_chunks: list[StreamChunk] = []
+
+        async for mutation_type, payload in mutations:
+            chunk = await self.send_chunk(mutation_type, payload, transport)
+            sent_chunks.append(chunk)
+
+        done_chunk = await self.send_chunk(
+            MutationType.DONE,
+            {"total_chunks": len(sent_chunks)},
+            transport,
+        )
+        sent_chunks.append(done_chunk)
+
+        return sent_chunks
+```
+
+### 19.9.3 Client-Side State Reconciliation
+
+The client must handle three challenges: out-of-order delivery (possible under connection retry), duplicate chunks (from at-least-once delivery), and progressive rendering without visible jank.
+
+```python
+import json
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+
+@dataclass
+class ClientStreamState:
+    """Manages client-side stream state with deduplication and ordering."""
+
+    session_id: str
+    last_processed_seq: int = 0
+    seen_checksums: set[str] = field(default_factory=set)
+    pending_chunks: dict[int, dict[str, Any]] = field(default_factory=dict)
+    text_buffer: str = ""
+    is_complete: bool = False
+
+    # Registry of mutation handlers
+    _handlers: dict[str, Callable] = field(default_factory=dict, repr=False)
+
+    def register_handler(self, mutation_type: str, handler: Callable) -> None:
+        """Register a callback for a specific mutation type."""
+        self._handlers[mutation_type] = handler
+
+    def process_chunk(self, raw_json: str) -> bool:
+        """Process a single chunk. Returns True if chunk was applied."""
+        data = json.loads(raw_json)
+        seq = data["seq"]
+        checksum = data.get("cksum")
+
+        # Deduplication: skip if already seen
+        if checksum and checksum in self.seen_checksums:
+            return False
+
+        # Ordering: buffer out-of-order chunks
+        if seq != self.last_processed_seq + 1:
+            self.pending_chunks[seq] = data
+            return False
+
+        # Apply this chunk
+        self._apply_chunk(data)
+        if checksum:
+            self.seen_checksums.add(checksum)
+
+        # Process any buffered in-order chunks
+        while (self.last_processed_seq + 1) in self.pending_chunks:
+            next_data = self.pending_chunks.pop(self.last_processed_seq + 1)
+            self._apply_chunk(next_data)
+            cksum = next_data.get("cksum")
+            if cksum:
+                self.seen_checksums.add(cksum)
+
+        return True
+
+    def _apply_chunk(self, data: dict[str, Any]) -> None:
+        """Dispatch chunk to the appropriate handler."""
+        mutation_type = data["type"]
+        payload = data["payload"]
+        self.last_processed_seq = data["seq"]
+
+        if mutation_type == "done":
+            self.is_complete = True
+            return
+
+        handler = self._handlers.get(mutation_type)
+        if handler:
+            handler(payload)
+        else:
+            # Default: append text chunks to buffer
+            if mutation_type == "text_append":
+                self.text_buffer += payload.get("text", "")
+```
+
+### 19.9.4 Zero-Jank Rendering with `requestAnimationFrame` Batching
+
+Direct DOM manipulation on every incoming chunk causes layout thrashing. The solution is to batch mutations within a single animation frame.
+
+```javascript
+class ChunkedRenderer {
+  constructor(stateManager) {
+    this.state = stateManager;
+    this.pendingMutations = [];
+    this.rafScheduled = false;
+  }
+
+  onChunk(rawJson) {
+    const chunk = JSON.parse(rawJson);
+
+    // Deduplication
+    if (chunk.cksum && this.seenChecksums?.has(chunk.cksum)) {
+      return;
+    }
+
+    // Buffer mutations
+    this.pendingMutations.push(chunk);
+
+    // Schedule a single DOM update
+    if (!this.rafScheduled) {
+      this.rafScheduled = true;
+      requestAnimationFrame(() => this.flushMutations());
+    }
+  }
+
+  flushMutations() {
+    this.rafScheduled = false;
+
+    // Sort by sequence ID for deterministic ordering
+    this.pendingMutations.sort((a, b) => a.seq - b.seq);
+
+    for (const chunk of this.pendingMutations) {
+      this.applyMutation(chunk);
+    }
+
+    this.pendingMutations = [];
+  }
+
+  applyMutation(chunk) {
+    const { type, payload } = chunk;
+
+    switch (type) {
+      case 'text_append':
+        this.appendToActiveElement(payload.text);
+        break;
+      case 'code_highlight':
+        this.updateCodeBlock(payload.language, payload.code);
+        break;
+      case 'chart_update':
+        this.updateChart(payload.chartId, payload.dataPoints);
+        break;
+      case 'form_field':
+        this.populateFormField(payload.fieldId, payload.value);
+        break;
+      case 'status_update':
+        this.updateStatusBar(payload.message, payload.progress);
+        break;
+      case 'done':
+        this.markStreamComplete(payload.totalChunks);
+        break;
+    }
+  }
+
+  appendToActiveElement(text) {
+    const el = document.getElementById('stream-output');
+    if (el) {
+      el.appendChild(document.createTextNode(text));
+      // Progressive scroll: keep bottom in view if user hasn't scrolled up
+      if (this.isNearBottom(el)) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+  }
+
+  isNearBottom(el, threshold = 50) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  }
+}
+```
+
+### 19.9.5 Protocol Trade-offs
+
+| Decision | Option A | Option B | Production Recommendation |
+|----------|----------|----------|--------------------------|
+| Transport | WebSocket | SSE | SSE for text generation; WebSocket for bidirectional (tool calls, interrupts) |
+| Message format | JSON | Protobuf/MessagePack | JSON for debugging simplicity; binary for high-throughput (>10k chunks/sec) |
+| Ordering guarantee | Server-side sequence IDs | Client-side reassembly | Server-side IDs — simpler client, easier debugging |
+| Deduplication | Checksum on content | Sequence-based idempotency | Checksum — handles connection retries cleanly |
+| Chunk size | Fixed (e.g., 512 bytes) | Variable (natural boundaries) | Variable with max cap — balances latency and overhead |
+| Reconnection | Client auto-retry with backoff | Server replays from last ACK | Client retry + server stores last N chunks for replay |
+| Backpressure | Client signals pause via WebSocket | None (SSE) | Implement application-level flow control for WebSocket; rate-limit generation for SSE |
+
+### 19.9.6 Testing the Streaming Protocol
+
+```python
+import pytest
+import asyncio
+
+
+class TestChunkedStreamingProtocol:
+    def setup_method(self):
+        self.protocol = ChunkedStreamingProtocol(session_id="test-session-001")
+
+    @pytest.mark.asyncio
+    async def test_sequence_ids_are_monotonic(self):
+        """Chunks must arrive with strictly increasing sequence IDs."""
+        transport_chunks = []
+
+        async def mock_transport_send(data: str):
+            transport_chunks.append(data)
+
+        async def text_stream():
+            for word in ["Hello", " ", "World"]:
+                yield word
+
+        await self.protocol.stream_text_response(text_stream(), mock_transport_send())
+
+        sequences = [json.loads(c)["seq"] for c in transport_chunks]
+        assert sequences == sorted(sequences)
+        assert sequences[-1] > sequences[0]
+
+    @pytest.mark.asyncio
+    async def test_done_signal_sent_last(self):
+        """The DONE chunk must always be the final message."""
+        transport_chunks = []
+
+        async def mock_transport_send(data: str):
+            transport_chunks.append(data)
+
+        async def text_stream():
+            yield "test"
+
+        await self.protocol.stream_text_response(text_stream(), mock_transport_send())
+
+        last_chunk = json.loads(transport_chunks[-1])
+        assert last_chunk["type"] == "done"
+        assert last_chunk["payload"]["total_chunks"] == len(transport_chunks) - 1
+
+    def test_client_deduplicates_chunks(self):
+        """Client must skip chunks with duplicate checksums."""
+        state = ClientStreamState(session_id="test-session-001")
+        state.register_handler("text_append", lambda p: None)
+
+        chunk_json = json.dumps({
+            "seq": 1,
+            "type": "text_append",
+            "session": "test-session-001",
+            "payload": {"text": "hello"},
+            "ts": 1000.0,
+            "parent": None,
+            "cksum": "abc123",
+        })
+
+        assert state.process_chunk(chunk_json) is True
+        assert state.process_chunk(chunk_json) is False  # Duplicate rejected
+
+    def test_client_handles_out_of_order(self):
+        """Client must buffer and reorder out-of-order chunks."""
+        state = ClientStreamState(session_id="test-session-001")
+        results = []
+        state.register_handler("text_append", lambda p: results.append(p["text"]))
+
+        # Send chunk 2 before chunk 1
+        chunk2 = json.dumps({
+            "seq": 2, "type": "text_append", "session": "s1",
+            "payload": {"text": "world"}, "ts": 1000.0, "parent": None, "cksum": None,
+        })
+        chunk1 = json.dumps({
+            "seq": 1, "type": "text_append", "session": "s1",
+            "payload": {"text": "hello "}, "ts": 999.0, "parent": None, "cksum": None,
+        })
+
+        state.process_chunk(chunk2)  # Buffered
+        assert results == []
+
+        state.process_chunk(chunk1)  # Triggers both 1 and 2
+        assert results == ["hello ", "world"]
+```
+
+---
+
+## 19.10 Blue-Green Model Deployment
+
+Deploying a new model version in a GenAI application is fundamentally different from deploying a typical web service. A model upgrade changes the weights, the tokenizer, the context window requirements, and potentially the response format — all while active users maintain multi-minute streaming WebSocket connections to the current version. Blue-green deployment provides zero-downtime migration, but the mechanics require special handling for long-lived AI connections.
+
+### 19.10.1 Architecture Overview
+
+```mermaid
+stateDiagram-v2
+    [*] --> Blue_Active
+
+    Blue_Active --> Green_Deploying: Deploy green model
+    Green_Deploying --> Green_Validation: Deploy complete
+    Green_Validation --> Green_Shadow: Validation pass
+    Green_Validation --> Blue_Active: Validation FAIL → rollback
+    Green_Shadow --> Traffic_Shift: Start traffic shift
+    Traffic_Shift --> Blue_Green_Split: 10% → green
+    Blue_Green_Split --> Blue_Green_Split: Increment traffic %
+    Blue_Green_Split --> Green_Active: 100% → green
+    Green_Active --> Blue_Rollback: Incident detected
+    Blue_Rollback --> Blue_Active: Traffic 100% → blue
+    Blue_Active --> [*]
+    Green_Active --> [*]
+```
+
+### 19.10.2 Connection Draining
+
+When shifting traffic from blue to green, active WebSocket connections must be drained gracefully. Dropping a mid-stream connection loses generated content and degrades user experience.
+
+```python
+import asyncio
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+
+class DeploymentState(Enum):
+    BLUE_ACTIVE = "blue_active"
+    GREEN_DEPLOYING = "green_deploying"
+    GREEN_VALIDATION = "green_validation"
+    GREEN_SHADOW = "green_shadow"
+    TRAFFIC_SHIFT = "traffic_shift"
+    GREEN_ACTIVE = "green_active"
+    BLUE_ROLLBACK = "blue_rollback"
+
+
+@dataclass
+class ActiveConnection:
+    connection_id: str
+    model_version: str
+    started_at: float
+    last_activity: float
+    is_streaming: bool = False
+    completion_sent: bool = False
+
+
+@dataclass
+class BlueGreenDeployer:
+    """Manages blue-green deployment for GenAI model versions.
+
+    Handles connection draining, traffic shifting, and rollback for
+    applications with long-lived streaming connections.
+    """
+
+    blue_endpoint: str
+    green_endpoint: str
+    state: DeploymentState = DeploymentState.BLUE_ACTIVE
+    active_connections: dict[str, ActiveConnection] = field(default_factory=dict)
+    traffic_split_pct: float = 100.0  # % routed to blue
+    drain_timeout_seconds: float = 300.0  # 5 minutes max drain
+    validation_suite_results: Optional[dict] = None
+
+    def route_request(self, user_id: str) -> str:
+        """Route a new request based on current traffic split.
+
+        Uses consistent hashing on user_id to ensure session affinity:
+        the same user always hits the same model version during a shift.
+        """
+        if self.state == DeploymentState.BLUE_ACTIVE:
+            return self.blue_endpoint
+
+        if self.state == DeploymentState.GREEN_ACTIVE:
+            return self.green_endpoint
+
+        if self.state == DeploymentState.TRAFFIC_SHIFT:
+            # Consistent hash: same user always routes same direction
+            hash_val = hash(user_id) % 100
+            if hash_val < self.traffic_split_pct:
+                return self.blue_endpoint
+            return self.green_endpoint
+
+        # During deployment/validation, all traffic stays on blue
+        return self.blue_endpoint
+
+    def register_connection(self, conn: ActiveConnection) -> None:
+        """Track a new active connection."""
+        self.active_connections[conn.connection_id] = conn
+
+    def deregister_connection(self, connection_id: str) -> None:
+        """Remove a completed or closed connection."""
+        self.active_connections.pop(connection_id, None)
+
+    def get_blue_connections(self) -> list[ActiveConnection]:
+        """Return all connections currently on the blue model."""
+        return [
+            c for c in self.active_connections.values()
+            if c.model_version == "blue"
+        ]
+
+    def get_green_connections(self) -> list[ActiveConnection]:
+        """Return all connections currently on the green model."""
+        return [
+            c for c in self.active_connections.values()
+            if c.model_version == "green"
+        ]
+
+    async def drain_blue_connections(self) -> dict:
+        """Wait for all blue connections to complete naturally.
+
+        Returns a status report with connection counts and any timeouts.
+        """
+        start_time = time.time()
+        report = {
+            "total_drained": 0,
+            "timed_out": 0,
+            "timed_out_connections": [],
+        }
+
+        while True:
+            blue_conns = self.get_blue_connections()
+            if not blue_conns:
+                break
+
+            elapsed = time.time() - start_time
+            if elapsed > self.drain_timeout_seconds:
+                report["timed_out"] = len(blue_conns)
+                report["timed_out_connections"] = [
+                    c.connection_id for c in blue_conns
+                ]
+                # Force-close remaining connections
+                for conn in blue_conns:
+                    self.deregister_connection(conn.connection_id)
+                break
+
+            # Check for stale connections (no activity for 60s)
+            stale_threshold = time.time() - 60.0
+            for conn in blue_conns:
+                if conn.last_activity < stale_threshold and not conn.is_streaming:
+                    self.deregister_connection(conn.connection_id)
+                    report["total_drained"] += 1
+
+            await asyncio.sleep(1.0)
+
+        report["drain_duration_seconds"] = time.time() - start_time
+        return report
+```
+
+### 19.10.3 Traffic Shifting Strategies
+
+Gradual traffic shifting with session affinity prevents the "thundering herd" problem where all users hit the new model simultaneously.
+
+```python
+    async def shift_traffic(
+        self,
+        increment_pct: float = 10.0,
+        shift_interval_seconds: float = 60.0,
+        health_check_fn=None,
+    ) -> dict:
+        """Gradually shift traffic from blue to green.
+
+        Args:
+            increment_pct: Percentage of traffic to shift per step.
+            shift_interval_seconds: Seconds to wait between shifts.
+            health_check_fn: Async callable that returns True if green is healthy.
+
+        Returns:
+            Final deployment report.
+        """
+        report = {
+            "steps": [],
+            "final_state": None,
+            "rollback_triggered": False,
+        }
+
+        green_pct = 0.0
+
+        while green_pct < 100.0:
+            green_pct = min(green_pct + increment_pct, 100.0)
+            self.traffic_split_pct = 100.0 - green_pct
+
+            step_report = {
+                "green_traffic_pct": green_pct,
+                "timestamp": time.time(),
+                "blue_connections": len(self.get_blue_connections()),
+                "green_connections": len(self.get_green_connections()),
+            }
+
+            # Run health check at each step
+            if health_check_fn:
+                is_healthy = await health_check_fn()
+                if not is_healthy:
+                    step_report["health_check"] = "FAILED"
+                    report["steps"].append(step_report)
+                    report["rollback_triggered"] = True
+                    await self.rollback()
+                    report["final_state"] = self.state.value
+                    return report
+                step_report["health_check"] = "passed"
+
+            report["steps"].append(step_report)
+            await asyncio.sleep(shift_interval_seconds)
+
+        # All traffic shifted — drain remaining blue connections
+        drain_report = await self.drain_blue_connections()
+        report["drain_report"] = drain_report
+
+        self.state = DeploymentState.GREEN_ACTIVE
+        report["final_state"] = self.state.value
+        return report
+```
+
+### 19.10.4 Rollback Mechanics
+
+Rollback must be instantaneous — shift all traffic back to blue immediately — without waiting for green connections to drain. Green connections are allowed to finish naturally while all new traffic goes to blue.
+
+```python
+    async def rollback(self, reason: str = "manual") -> dict:
+        """Instantly shift all traffic back to blue.
+
+        Existing green connections continue until completion.
+        No new connections are routed to green.
+        """
+        rollback_report = {
+            "reason": reason,
+            "timestamp": time.time(),
+            "previous_state": self.state.value,
+            "green_connections_orphaned": len(self.get_green_connections()),
+        }
+
+        # Instant traffic shift — no gradual transition
+        self.traffic_split_pct = 100.0
+        self.state = DeploymentState.BLUE_ACTIVE
+        rollback_report["new_state"] = self.state.value
+
+        # Log orphaned green connections for monitoring
+        for conn in self.get_green_connections():
+            rollback_report.setdefault("orphaned_connection_ids", []).append(
+                conn.connection_id
+            )
+
+        return rollback_report
+```
+
+### 19.10.5 Pre-Shift Validation
+
+Before shifting any traffic to green, run an evaluation suite against the green model to catch regressions before users see them.
+
+```python
+    async def validate_green_model(
+        self,
+        eval_suite_fn,
+        min_pass_rate: float = 0.95,
+    ) -> dict:
+        """Run evaluation suite against green model before traffic shift.
+
+        Args:
+            eval_suite_fn: Async function that returns {
+                "pass_rate": float,
+                "total_cases": int,
+                "failed_cases": list[dict],
+                "latency_p95_ms": float,
+            }
+            min_pass_rate: Minimum acceptable pass rate (0.0-1.0).
+
+        Returns:
+            Validation report with pass/fail decision.
+        """
+        self.state = DeploymentState.GREEN_VALIDATION
+
+        results = await eval_suite_fn()
+        passed = results["pass_rate"] >= min_pass_rate
+
+        report = {
+            "pass_rate": results["pass_rate"],
+            "min_required": min_pass_rate,
+            "total_cases": results["total_cases"],
+            "failed_count": len(results.get("failed_cases", [])),
+            "latency_p95_ms": results.get("latency_p95_ms"),
+            "decision": "PROCEED" if passed else "ROLLBACK",
+        }
+
+        if not passed:
+            report["failed_samples"] = results.get("failed_cases", [])[:5]
+            self.state = DeploymentState.BLUE_ACTIVE
+        else:
+            self.state = DeploymentState.GREEN_SHADOW
+
+        self.validation_suite_results = report
+        return report
+```
+
+### 19.10.6 Complete Deployment Flow
+
+```python
+async def execute_blue_green_deploy(
+    deployer: BlueGreenDeployer,
+    eval_suite_fn,
+    health_check_fn,
+):
+    """Execute a complete blue-green deployment cycle."""
+
+    # Step 1: Deploy green model (infrastructure-level, not shown)
+    deployer.state = DeploymentState.GREEN_DEPLOYING
+    await deploy_green_model(deployer.green_endpoint)
+    deployer.state = DeploymentState.GREEN_VALIDATION
+
+    # Step 2: Validate green against evaluation suite
+    validation = await deployer.validate_green_model(eval_suite_fn)
+    if validation["decision"] == "ROLLBACK":
+        print(f"Validation failed: {validation['failed_count']} failures")
+        return validation
+
+    # Step 3: Shadow mode — route 0% live traffic but compare outputs
+    deployer.state = DeploymentState.GREEN_SHADOW
+    shadow_report = await run_shadow_comparison(
+        deployer.blue_endpoint,
+        deployer.green_endpoint,
+        duration_seconds=300,
+    )
+
+    if shadow_report["regression_detected"]:
+        await deployer.rollback(reason="shadow_regression")
+        return {"status": "rolled_back", "reason": "shadow_regression"}
+
+    # Step 4: Gradual traffic shift with health checks
+    deployer.state = DeploymentState.TRAFFIC_SHIFT
+    shift_report = await deployer.shift_traffic(
+        increment_pct=10.0,
+        shift_interval_seconds=120.0,
+        health_check_fn=health_check_fn,
+    )
+
+    return shift_report
+```
+
+### 19.10.7 Deployment Decision Matrix
+
+| Scenario | Action | Rationale |
+|----------|--------|-----------|
+| Green validation pass rate > 95% | Proceed to traffic shift | Model meets quality bar |
+| Green validation pass rate 85-95% | Extend shadow period, investigate failures | Marginal — needs more data |
+| Green validation pass rate < 85% | Rollback, do not shift traffic | Clear regression |
+| Shadow comparison shows >2% regression on any metric | Rollback | Latency or quality regression detected under real traffic patterns |
+| Traffic shift at 50% shows latency spike > 2x blue | Pause shift, investigate | Green may have resource contention |
+| All traffic shifted, green connections draining | Monitor drain completion | Normal operation |
+| Drain timeout exceeded | Force-close stale connections, alert on-call | Connection leak or client bug |
+| Incident detected post-deployment | Instant rollback to blue | Safety first — restore user experience immediately |
+
+---
+
+## 19.11 Key Takeaways
 
 1. **Product design matters as much as technical architecture.** A technically excellent product that users do not adopt is a failure. Design for adoption from day one — streaming, citations, confidence indicators, feedback loops.
 
@@ -1176,7 +1992,7 @@ class TestEnterpriseSearch:
 
 ---
 
-## 19.10 Further Reading
+## 19.12 Further Reading
 
 - **"The Design of Everyday Things" by Don Norman** — Chapter 3 (Knowledge in the Head and in the World) covers how users form mental models, directly applicable to AI product design.
 

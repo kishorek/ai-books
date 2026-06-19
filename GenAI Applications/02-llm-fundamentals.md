@@ -842,7 +842,249 @@ def test_max_tokens_truncation():
 
 ---
 
-## 2.8 Key Takeaways
+## 2.7 Tokenizer Anomalies and Glitch Tokens
+
+Tokenizers trained on large corpora sometimes produce "glitch tokens" — tokens that represent unusual byte sequences, control characters, or fragments that the model has never seen in meaningful context. These tokens can cause decoding loops, generate garbage output, or crash completion engines.
+
+### 2.7.1 What Are Glitch Tokens
+
+Glitch tokens emerge during BPE training when rare byte sequences appear frequently enough to be merged into single tokens but rarely enough that the model never learns meaningful representations for them. Common sources:
+
+- **Encoding artifacts**: UTF-8 BOM characters, zero-width spaces, control characters
+- **Training data noise**: HTML tags, email headers, binary data fragments
+- **Domain-specific jargon**: Chemical formulas, legal citations, mathematical notation that split unexpectedly
+
+When the model encounters these tokens during decoding, it may:
+1. Generate the glitch token repeatedly (infinite loop)
+2. Output incoherent text (the model "hallucinates" meaning)
+3. Produce extremely long outputs (the model keeps trying to "fix" the token)
+
+### 2.7.2 Detection and Alerting
+
+```python
+import tiktoken
+from collections import Counter
+
+class GlitchTokenDetector:
+    """Detect and alert on glitch tokens in production."""
+
+    def __init__(self, model_name: str = "gpt-4"):
+        self.tokenizer = tiktoken.encoding_for_model(model_name)
+        self.known_glitch_tokens: set[int] = set()
+        self.alert_threshold = 3  # Repeat count before alerting
+
+    def scan_output(self, text: str) -> dict:
+        """Scan model output for glitch token patterns."""
+        tokens = self.tokenizer.encode(text)
+        token_strings = [self.tokenizer.decode([t]) for t in tokens]
+
+        findings = []
+
+        # Signal 1: High repeat rate of unusual tokens
+        token_counts = Counter(tokens)
+        for token_id, count in token_counts.most_common(10):
+            if count >= self.alert_threshold:
+                token_str = self.tokenizer.decode([token_id])
+                # Heuristic: glitch tokens are often short, unusual strings
+                if self._is_suspicious_token(token_str):
+                    findings.append({
+                        "token_id": token_id,
+                        "token_text": repr(token_str),
+                        "repeat_count": count,
+                        "type": "repetition_loop",
+                    })
+
+        # Signal 2: Extremely long outputs (>4000 tokens for simple queries)
+        if len(tokens) > 4000:
+            findings.append({
+                "type": "output_length_anomaly",
+                "token_count": len(tokens),
+            })
+
+        # Signal 3: Known glitch tokens from registry
+        known_hits = [t for t in tokens if t in self.known_glitch_tokens]
+        if known_hits:
+            findings.append({
+                "type": "known_glitch_token",
+                "token_ids": list(set(known_hits)),
+                "count": len(known_hits),
+            })
+
+        return {
+            "has_anomalies": len(findings) > 0,
+            "findings": findings,
+            "token_count": len(tokens),
+            "unique_tokens": len(set(tokens)),
+        }
+
+    def _is_suspicious_token(self, token_str: str) -> bool:
+        """Heuristic to identify potentially glitchy tokens."""
+        # Very short tokens that aren't common words/punctuation
+        if len(token_str) <= 2 and token_str not in '.,!?;:\n\t':
+            return True
+        # Tokens with unusual character combinations
+        if any(c in token_str for c in ['\x00', '\ufeff', '\u200b']):
+            return True
+        # Tokens that look like encoding artifacts
+        if token_str.startswith('Ã') or token_str.startswith('â'):
+            return True
+        return False
+
+    def register_glitch(self, token_id: int):
+        """Add a confirmed glitch token to the registry."""
+        self.known_glitch_tokens.add(token_id)
+
+    def scan_input(self, text: str) -> dict:
+        """Scan user input for tokens that may trigger glitch behavior."""
+        tokens = self.tokenizer.encode(text)
+        suspicious = [t for t in tokens if t in self.known_glitch_tokens]
+        return {
+            "has_suspicious_tokens": len(suspicious) > 0,
+            "suspicious_count": len(suspicious),
+            "action": "strip" if suspicious else "pass",
+        }
+```
+
+### 2.7.3 Mitigation Strategies
+
+| Strategy | Implementation | Effectiveness | Overhead |
+|----------|---------------|---------------|----------|
+| Output length limits | Cap max_tokens | Prevents infinite loops | Zero |
+| Token frequency monitoring | Count repeated tokens | Catches loops mid-generation | ~1ms per request |
+| Known glitch registry | Maintain blocklist | Catches known bad tokens | ~0.1ms per request |
+| Repetition penalty | Adjust `frequency_penalty` | Reduces loop probability | None (API parameter) |
+| Input sanitization | Strip suspicious chars | Prevents triggering glitches | ~0.5ms per request |
+
+---
+
+## 2.8 Dynamic Decoding Parameter Tuning
+
+Static decoding parameters (temperature, top-p, top-k) produce suboptimal results across diverse query types. A code generation system benefits from low temperature, while a brainstorming assistant needs high temperature. Dynamic tuning adjusts parameters based on real-time execution feedback.
+
+### 2.8.1 The Feedback Loop Architecture
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+
+class TaskType(Enum):
+    CODE_GENERATION = "code"
+    FACTUAL_QA = "factual"
+    CREATIVE_WRITING = "creative"
+    DATA_EXTRACTION = "extraction"
+    BRAINSTORMING = "brainstorming"
+
+@dataclass
+class DecodingConfig:
+    temperature: float
+    top_p: float
+    top_k: int
+    frequency_penalty: float
+    presence_penalty: float
+
+class DynamicDecodingTuner:
+    """Adjust decoding parameters based on task type and execution feedback."""
+
+    BASELINE_CONFIGS = {
+        TaskType.CODE_GENERATION: DecodingConfig(
+            temperature=0.0, top_p=1.0, top_k=1,
+            frequency_penalty=0.0, presence_penalty=0.0,
+        ),
+        TaskType.FACTUAL_QA: DecodingConfig(
+            temperature=0.0, top_p=1.0, top_k=1,
+            frequency_penalty=0.0, presence_penalty=0.0,
+        ),
+        TaskType.CREATIVE_WRITING: DecodingConfig(
+            temperature=0.9, top_p=0.95, top_k=50,
+            frequency_penalty=0.3, presence_penalty=0.3,
+        ),
+        TaskType.DATA_EXTRACTION: DecodingConfig(
+            temperature=0.0, top_p=1.0, top_k=1,
+            frequency_penalty=0.0, presence_penalty=0.0,
+        ),
+        TaskType.BRAINSTORMING: DecodingConfig(
+            temperature=1.2, top_p=0.98, top_k=100,
+            frequency_penalty=0.5, presence_penalty=0.5,
+        ),
+    }
+
+    def __init__(self):
+        self.execution_history: list[dict] = []
+
+    def get_config(self, task_type: TaskType, feedback: dict = None) -> DecodingConfig:
+        """Get optimal decoding config, incorporating recent feedback."""
+        base = self.BASELINE_CONFIGS[task_type]
+
+        if not feedback:
+            return base
+
+        # Adjust based on feedback signals
+        return self._adjust(base, feedback, task_type)
+
+    def _adjust(self, base: DecodingConfig, feedback: dict,
+                task_type: TaskType) -> DecodingConfig:
+        """Apply feedback-based adjustments."""
+        adjustments = {}
+
+        # Signal 1: Compilation/execution failures (for code)
+        if task_type == TaskType.CODE_GENERATION:
+            failure_rate = feedback.get("compilation_failure_rate", 0)
+            if failure_rate > 0.3:
+                # Too many failures: lower temperature for more deterministic output
+                adjustments["temperature"] = max(base.temperature - 0.2, 0.0)
+                adjustments["frequency_penalty"] = min(base.frequency_penalty + 0.1, 1.0)
+
+        # Signal 2: Repetition detected
+        repetition_rate = feedback.get("repetition_rate", 0)
+        if repetition_rate > 0.2:
+            adjustments["frequency_penalty"] = min(base.frequency_penalty + 0.2, 1.0)
+            adjustments["temperature"] = min(base.temperature + 0.1, 1.5)
+
+        # Signal 3: Output too short/long
+        avg_length = feedback.get("avg_output_tokens", 500)
+        target_length = feedback.get("target_output_tokens", 500)
+        if avg_length < target_length * 0.5:
+            adjustments["temperature"] = min(base.temperature + 0.2, 1.5)
+        elif avg_length > target_length * 2:
+            adjustments["temperature"] = max(base.temperature - 0.1, 0.0)
+
+        # Signal 4: User dissatisfaction
+        satisfaction = feedback.get("satisfaction_score", 0.8)
+        if satisfaction < 0.6:
+            adjustments["temperature"] = max(base.temperature - 0.15, 0.0)
+
+        # Apply adjustments
+        return DecodingConfig(
+            temperature=adjustments.get("temperature", base.temperature),
+            top_p=adjustments.get("top_p", base.top_p),
+            top_k=adjustments.get("top_k", base.top_k),
+            frequency_penalty=adjustments.get("frequency_penalty", base.frequency_penalty),
+            presence_penalty=adjustments.get("presence_penalty", base.presence_penalty),
+        )
+
+    def record_execution(self, task_type: TaskType, config: DecodingConfig,
+                         metrics: dict):
+        """Record execution results for feedback."""
+        self.execution_history.append({
+            "task_type": task_type,
+            "config": config,
+            "metrics": metrics,
+        })
+```
+
+### 2.8.2 Decoding Parameter Decision Matrix
+
+| Parameter | Low Value Effect | High Value Effect | When to Adjust |
+|-----------|-----------------|-------------------|----------------|
+| Temperature | Deterministic, focused | Creative, diverse | Repetition → increase; Hallucination → decrease |
+| Top-p | Narrow sampling | Broad sampling | Coherence issues → decrease; Monotony → increase |
+| Top-k | Conservative | Adventurous | Similar to top-p, often use one or the other |
+| Frequency penalty | Allow repetition | Penalize repetition | Repetitive output → increase |
+| Presence penalty | No topic shift | Encourage new topics | Stuck on one topic → increase |
+
+---
+
+## 2.9 Key Takeaways
 
 1. **LLMs generate text one token at a time — each token requires a full forward pass, making latency scale with output length.** Streaming is not optional for user-facing applications. Measure and optimize time-to-first-token separately from total generation time.
 
@@ -866,7 +1108,7 @@ def test_max_tokens_truncation():
 
 ---
 
-## 2.9 Further Reading
+## 2.10 Further Reading
 
 - **Vaswani et al., "Attention Is All You Need" (2017)** — The transformer paper. Section 3.2 describes the self-attention mechanism in detail. Essential for understanding why attention is O(n²) and why context windows have computational limits.
 

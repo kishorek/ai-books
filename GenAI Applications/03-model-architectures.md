@@ -819,6 +819,378 @@ FALLBACK_CHAINS = {
 
 ---
 
+## 3.5 State Space Models vs. Transformers
+
+While transformers dominate current GenAI, State Space Models (SSMs) like Mamba represent a fundamentally different architecture with distinct trade-offs for production deployment.
+
+### 3.5.1 Architecture Comparison
+
+Transformers process all tokens simultaneously through self-attention (O(n²) complexity). SSMs process tokens sequentially through a recurrence relation (O(n) complexity), similar to RNNs but with the parallelism benefits of convolutions during training.
+
+| Aspect | Transformer | SSM (Mamba) |
+|--------|------------|-------------|
+| Attention | Quadratic O(n²) | Linear O(n) |
+| Context window | Fixed (training-dependent) | Effectively infinite |
+| Parallelization | Excellent (attention is parallelizable) | Good (parallel scan during training) |
+| Memory scaling | KV cache grows linearly with context | State size fixed regardless of context |
+| Long-range reasoning | Degrades at extended lengths | Maintains coherence over long sequences |
+| Training efficiency | High (mature infrastructure) | Lower (less optimized tooling) |
+| Inference speed | Fast with KV cache | Fast with state compression |
+| Ecosystem maturity | Production-ready | Early production |
+
+### 3.5.2 When SSMs Outperform Transformers
+
+SSMs excel in scenarios with massive, continuous data streams:
+
+**Industrial IoT telemetry**: A sensor network generating millions of data points per hour. Transformers struggle with context lengths beyond 128K tokens. SSMs process arbitrary-length streams with fixed memory.
+
+**Long document processing**: Legal contracts spanning hundreds of pages, genomic sequences, or financial time series. SSMs maintain coherence across the full document without chunking.
+
+**Real-time streaming**: Live video analysis, audio processing, or continuous monitoring. SSMs process each new data point in O(1) time relative to accumulated history.
+
+```python
+class SSMvsTransformerDecision:
+    """Decide between SSM and Transformer architectures."""
+
+    DECISION_FACTORS = {
+        "context_length": {
+            "short (<32K tokens)": "transformer",
+            "medium (32K-128K)": "transformer_with_optimization",
+            "long (128K-1M)": "either_with_tradeoffs",
+            "very_long (>1M)": "ssm_preferred",
+            "infinite_streaming": "ssm_required",
+        },
+        "task_type": {
+            "discrete_qa": "transformer",
+            "multi_hop_reasoning": "transformer_with_rag",
+            "continuous_streaming": "ssm_preferred",
+            "time_series": "ssm_preferred",
+            "code_generation": "transformer",
+            "classification": "transformer",
+        },
+        "infrastructure": {
+            "gpu_cluster_available": "transformer",
+            "edge_deployment": "ssm_preferred",
+            "memory_constrained": "ssm_preferred",
+            "established_mlops": "transformer",
+        },
+    }
+
+    def recommend(self, context_length: str, task_type: str,
+                  infrastructure: str) -> dict:
+        transformer_score = 0
+        ssm_score = 0
+
+        for factor, value in [
+            ("context_length", context_length),
+            ("task_type", task_type),
+            ("infrastructure", infrastructure),
+        ]:
+            rec = self.DECISION_FACTORS.get(factor, {}).get(value, "")
+            if "transformer" in rec:
+                transformer_score += 1
+            elif "ssm" in rec:
+                ssm_score += 1
+
+        return {
+            "recommendation": "transformer" if transformer_score >= ssm_score else "ssm",
+            "transformer_score": transformer_score,
+            "ssm_score": ssm_score,
+            "rationale": self._explain(context_length, task_type, infrastructure),
+        }
+```
+
+### 3.5.3 Current Ecosystem Limitations of SSMs
+
+| Limitation | Impact | Mitigation |
+|-----------|--------|------------|
+| Fewer pre-trained models | Limited model selection | Use Mamba-2 or Jamba (hybrid SSM-Transformer) |
+| Weaker at few-shot learning | In-context learning degraded | Fine-tune on domain data |
+| Tool calling support | Not natively supported | Use hybrid architecture |
+| Quantization support | Less mature than transformers | Use GGUF format with llama.cpp |
+| Inference frameworks | vLLM/TGI less optimized for SSMs | Use Mamba-specific kernels |
+| Fine-tuning tooling | Limited LoRA/PEFT support | Use full fine-tuning or adapter layers |
+
+The practical recommendation: use transformers for general-purpose applications. Consider SSMs (or hybrid SSM-Transformer models like Jamba) when dealing with massive context lengths (>1M tokens), continuous streaming data, or memory-constrained edge deployments.
+
+---
+
+## 3.6 Speculative Decoding Architecture
+
+Speculative decoding accelerates autoregressive generation by using a smaller, faster "draft" model to propose multiple tokens, which are then verified in parallel by the larger "target" model. The key insight: verification is cheaper than generation because it can be parallelized.
+
+### 3.6.1 How Speculative Decoding Works
+
+```mermaid
+graph LR
+    A[Input Prompt] --> B[Draft Model<br/>Small/Fast]
+    B -->|Generate K tokens| C[K Candidate Tokens]
+    C --> D[Target Model<br/>Large/Slow]
+    D -->|Verify all K in parallel| E{Accept/Reject}
+    E -->|Accepted tokens| F[Output Buffer]
+    E -->|Rejected token| G[Use Target's token at rejection point]
+    F --> H[Continue generation]
+    G --> H
+```
+
+The draft model (e.g., Llama-3-8B) generates K candidate tokens quickly. The target model (e.g., Llama-3-70B) verifies all K tokens in a single forward pass. Accepted tokens are used; at the first rejection, the target model's token is used and the process restarts.
+
+### 3.6.2 Production Architecture
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class SpeculativeConfig:
+    draft_model: str          # Small model (e.g., Llama-3-8B)
+    target_model: str         # Large model (e.g., Llama-3-70B)
+    draft_tokens: int = 5     # K: tokens proposed per step
+    temperature: float = 0.7
+    acceptance_threshold: float = 0.9
+
+class SpeculativeDecoder:
+    """Speculative decoding with draft-target verification."""
+
+    def __init__(self, draft_client, target_client, config: SpeculativeConfig):
+        self.draft = draft_client
+        self.target = target_client
+        self.config = config
+
+    async def generate(self, prompt: str, max_tokens: int = 1000) -> dict:
+        """Generate using speculative decoding."""
+        tokens_generated = 0
+        draft_accepted = 0
+        draft_total = 0
+        output_tokens = []
+        context = prompt
+
+        while tokens_generated < max_tokens:
+            # Step 1: Draft model proposes K tokens
+            draft_result = await self.draft.generate(
+                context,
+                max_tokens=self.config.draft_tokens,
+                temperature=self.config.temperature,
+            )
+            draft_tokens = self._extract_tokens(draft_result)
+            draft_total += len(draft_tokens)
+
+            # Step 2: Target model verifies all K tokens in parallel
+            verify_input = context + "".join(draft_tokens)
+            target_result = await self.target.generate(
+                verify_input,
+                max_tokens=len(draft_tokens) + 1,
+                temperature=self.config.temperature,
+            )
+            target_distribution = self._get_token_distributions(target_result)
+
+            # Step 3: Accept or reject each draft token
+            accepted_count = 0
+            for i, draft_token in enumerate(draft_tokens):
+                target_prob = target_distribution[i].get(draft_token, 0)
+                draft_prob = draft_token.get("probability", 1.0)
+
+                # Acceptance criterion
+                if target_prob >= self.config.acceptance_threshold * draft_prob:
+                    output_tokens.append(draft_token)
+                    accepted_count += 1
+                    tokens_generated += 1
+                else:
+                    # Reject: use target model's token instead
+                    target_token = self._sample_from_distribution(
+                        target_distribution[i]
+                    )
+                    output_tokens.append(target_token)
+                    tokens_generated += 1
+                    break  # Restart from this point
+
+            draft_accepted += accepted_count
+
+            # Update context
+            context = prompt + "".join(t.get("text", "") for t in output_tokens)
+
+        acceptance_rate = draft_accepted / max(draft_total, 1)
+
+        return {
+            "text": "".join(t.get("text", "") for t in output_tokens),
+            "tokens_generated": tokens_generated,
+            "acceptance_rate": acceptance_rate,
+            "speedup_estimate": 1 + (acceptance_rate * (self.config.draft_tokens - 1)),
+        }
+```
+
+### 3.6.3 Draft-Target Misalignment
+
+When the draft and target models disagree frequently (low acceptance rate), speculative decoding degrades performance rather than improving it. Common causes:
+
+| Misalignment Cause | Symptom | Remedy |
+|-------------------|---------|--------|
+| Domain mismatch | Draft trained on different data | Use draft from same model family |
+| Size gap too large | 8B draft vs 700B target | Use intermediate draft (e.g., 70B) |
+| Different tokenizer | Token boundaries differ | Use same tokenizer for both |
+| Temperature mismatch | Draft and target sampling diverge | Match temperature settings |
+| Specialized vocabulary | Enterprise jargon not in draft | Fine-tune draft on domain data |
+
+### 3.6.4 Hardware Efficiency Impact
+
+| Configuration | Acceptance Rate | Effective Speedup | GPU Utilization |
+|--------------|----------------|-------------------|-----------------|
+| Same family (8B → 70B) | 85-95% | 2.5-3.5x | High |
+| Different families (3B → 70B) | 60-75% | 1.5-2.0x | Medium |
+| Domain-mismatched | 40-60% | 1.0-1.5x | Low (wasted draft compute) |
+| Well-tuned (70B → 70B) | 90-98% | 3.0-4.0x | Optimal |
+
+The key insight: speculative decoding works best when draft and target models are from the same family (e.g., Llama-3-8B → Llama-3-70B). Cross-family pairs (e.g., Mistral-7B → Llama-3-70B) often have lower acceptance rates due to different token distributions.
+
+---
+
+## 3.7 LoRA Adapter Hot-Swapping
+
+Serving thousands of enterprise customers, each requiring a personalized model, demands efficient adapter management. LoRA (Low-Rank Adaptation) enables multi-tenant serving without hosting thousands of full models.
+
+### 3.7.1 The Multi-Tenant LoRA Challenge
+
+Each customer's fine-tuned adapter is a small set of weight deltas (typically 10-100MB for a 70B model). Loading and unloading adapters on every request is prohibitively slow. The solution: pre-load frequently used adapters in GPU memory and serve them on-demand.
+
+```python
+from dataclasses import dataclass
+from collections import OrderedDict
+import time
+
+@dataclass
+class LoRAAdapter:
+    adapter_id: str
+    tenant_id: str
+    rank: int
+    delta_weights: dict      # LoRA A and B matrices
+    gpu_memory_mb: float
+    last_used: float
+    hit_count: int
+
+class LoRAAdapterManager:
+    """Manage LoRA adapter loading and eviction for multi-tenant serving."""
+
+    def __init__(self, max_gpu_memory_mb: float = 20000):
+        self.max_memory = max_gpu_memory_mb
+        self.loaded_adapters: OrderedDict[str, LoRAAdapter] = OrderedDict()
+        self.current_memory = 0
+
+    async def get_adapter(self, adapter_id: str) -> LoRAAdapter:
+        """Get adapter, loading from CPU/disk if not in GPU memory."""
+        if adapter_id in self.loaded_adapters:
+            # Cache hit: move to most-recently-used position
+            self.loaded_adapters.move_to_end(adapter_id)
+            self.loaded_adapters[adapter_id].last_used = time.time()
+            self.loaded_adapters[adapter_id].hit_count += 1
+            return self.loaded_adapters[adapter_id]
+
+        # Cache miss: load adapter
+        adapter = await self._load_adapter(adapter_id)
+
+        # Evict if necessary
+        while self.current_memory + adapter.gpu_memory_mb > self.max_memory:
+            self._evict_lru()
+
+        self.loaded_adapters[adapter_id] = adapter
+        self.current_memory += adapter.gpu_memory_mb
+        return adapter
+
+    def _evict_lru(self):
+        """Evict least recently used adapter."""
+        if not self.loaded_adapters:
+            return
+        adapter_id, adapter = self.loaded_adapters.popitem(last=False)
+        self.current_memory -= adapter.gpu_memory_mb
+        # Optionally: async write to CPU memory for faster reload
+
+    async def _load_adapter(self, adapter_id: str) -> LoRAAdapter:
+        """Load adapter from storage (CPU memory or disk)."""
+        # In production: load from S3/local NVMe with CUDA stream
+        # Simplified:
+        return LoRAAdapter(
+            adapter_id=adapter_id,
+            tenant_id="",
+            rank=16,
+            delta_weights={},
+            gpu_memory_mb=50,
+            last_used=time.time(),
+            hit_count=0,
+        )
+
+    def get_stats(self) -> dict:
+        total_hits = sum(a.hit_count for a in self.loaded_adapters.values())
+        return {
+            "loaded_count": len(self.loaded_adapters),
+            "memory_used_mb": self.current_memory,
+            "memory_max_mb": self.max_memory,
+            "utilization": self.current_memory / self.max_memory,
+            "total_cache_hits": total_hits,
+        }
+```
+
+### 3.7.2 CUDA Kernel Management
+
+S-LoRA and Punica enable efficient multi-adapter serving through custom CUDA kernels that batch LoRA computations across different adapters in the same GPU:
+
+```python
+class SLoRABatcher:
+    """Batch LoRA computations for different adapters on the same GPU."""
+
+    def __init__(self, base_model):
+        self.base_model = base_model
+        self.adapter_cache = {}
+
+    async def batch_forward(self, requests: list[dict]) -> list[dict]:
+        """Process multiple requests with different adapters in one batch."""
+        # Group requests by adapter
+        adapter_groups = {}
+        for req in requests:
+            adapter_id = req["adapter_id"]
+            if adapter_id not in adapter_groups:
+                adapter_groups[adapter_id] = []
+            adapter_groups[adapter_id].append(req)
+
+        results = [None] * len(requests)
+
+        # For each adapter group, compute base model output once
+        base_outputs = {}
+        for adapter_id, group in adapter_groups.items():
+            # Base model forward pass (shared across all requests)
+            base_output = await self.base_model.forward(
+                [r["input"] for r in group]
+            )
+            base_outputs[adapter_id] = base_output
+
+        # Apply LoRA adapters (each adapter is independent)
+        for adapter_id, group in adapter_groups.items():
+            adapter = await self._get_adapter(adapter_id)
+            lora_output = self._apply_lora(base_outputs[adapter_id], adapter)
+
+            for i, req in enumerate(group):
+                results[req["original_index"]] = lora_output[i]
+
+        return results
+
+    def _apply_lora(self, base_output, adapter):
+        """Apply LoRA delta: output += B @ A @ input"""
+        # LoRA: delta_W = B (d×r) @ A (r×d) where r << d
+        # This is O(r*d) instead of O(d²) for full weight update
+        return base_output  # Simplified
+```
+
+### 3.7.3 Cold Start Latency Mitigation
+
+| Strategy | Cold Start Latency | Memory Overhead | Implementation |
+|----------|-------------------|-----------------|----------------|
+| Pre-load popular adapters | 0ms (cache hit) | 50-100GB GPU | LRU cache with capacity limit |
+| CPU memory staging | 10-50ms | 0 GPU, 100GB+ CPU | Async PCIe transfer |
+| NVMe caching | 50-200ms | 0 GPU, SSD storage | DMA transfer to GPU |
+| On-demand loading | 200-500ms | 0 (lazy load) | S3/disk → GPU |
+| Adapter distillation | 0ms | Smaller adapters | Train smaller LoRA rank |
+
+The recommended architecture for production: pre-load top 100 adapters by tenant activity in GPU memory, stage the next 1000 in CPU memory, and load from NVMe for the long tail. Use adapter popularity predictions based on time-of-day and tenant activity patterns.
+
+---
+
 ## 3.8 Key Takeaways
 
 1. **MoE is the most impactful architectural innovation — it achieves frontier quality at a fraction of dense model cost.** The 17B active parameters from 400B total means you get 400B quality at 17B compute cost. This is the primary cost optimization lever in the current landscape.
@@ -843,7 +1215,7 @@ FALLBACK_CHAINS = {
 
 ---
 
-## 3.8 Further Reading
+## 3.9 Further Reading
 
 - **Vaswani et al., "Attention Is All You Need" (2017)** — The transformer paper. Section 3.2 describes multi-head attention. Essential for understanding the foundation of all modern LLM architectures.
 
@@ -866,3 +1238,17 @@ FALLBACK_CHAINS = {
 - **"Designing Machine Learning Systems" by Chip Huyen** — Chapters on model selection, deployment, and monitoring provide the engineering context for architecture decisions.
 
 - **"Efficient Transformers: A Survey" by Tay et al. (2022)** — Comprehensive survey of efficient transformer architectures, including attention optimization, pruning, and MoE. Essential background for understanding architectural innovations.
+
+- **Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces" (2023)** — The foundational SSM paper. Explains how selective state spaces achieve transformer-quality results with linear complexity.
+
+- **Jamba Technical Report (AI21, 2024)** — Hybrid SSM-Transformer architecture. Demonstrates how combining SSM layers with attention layers captures the benefits of both.
+
+- **Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (2023)** — The speculative decoding paper. Establishes the draft-target framework and proves output distribution preservation.
+
+- **Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling" (2023)** — Practical implementation details for speculative decoding with production LLMs.
+
+- **Hu et al., "LoRA: Low-Rank Adaptation of Large Language Models" (2022)** — The LoRA paper. Explains low-rank decomposition of weight updates for parameter-efficient fine-tuning.
+
+- **S-LoRA: Serving Thousands of Concurrent LoRA Adapters" (Sheng et al., 2023)** — Multi-tenant LoRA serving with custom CUDA kernels. The production architecture for adapter hot-swapping.
+
+- **Punica: Multi-SLoRA Serving" (Zheng et al., 2023)** — CUDA kernel design for batching different LoRA adapters in a single GPU forward pass.

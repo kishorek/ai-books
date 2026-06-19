@@ -1213,7 +1213,578 @@ class TestEndToEndPlatform:
 
 ---
 
-## 17.9 Key Takeaways
+## 17.7 Cross-Region State Recovery
+
+When an AWS region goes down, users in that region lose their active sessions — conversation context, tool results, partial outputs, and billing state. In a consumer chatbot, this is a minor annoyance. In an enterprise platform processing thousands of concurrent sessions with compliance requirements, it is a business continuity failure. Cross-region state recovery ensures that user sessions survive regional outages by checkpointing state to globally replicated storage and resuming in a healthy region.
+
+The core challenge is that LLM sessions are stateful. A user mid-conversation has accumulated context that cannot be reconstructed from scratch. The system must snapshot this state periodically, detect failures, and restore sessions transparently — without users noticing the transition and without duplicating billing charges.
+
+### 17.7.1 Session Checkpointing
+
+Every active session is checkpointed to a global database at configurable intervals. The checkpoint captures three components: the conversation context (message history and tool results), partial output state (any in-progress generation), and billing state (tokens consumed, cost accumulated, budget remaining). DynamoDB Global Tables provide multi-region, active-active replication with sub-second propagation.
+
+```python
+import json
+import hashlib
+import time
+from dataclasses import dataclass, field, asdict
+from enum import Enum
+
+class SessionStatus(Enum):
+    ACTIVE = "active"
+    CHECKPOINTED = "checkpointed"
+    RESUMED = "resumed"
+    EXPIRED = "expired"
+
+@dataclass
+class SessionCheckpoint:
+    session_id: str
+    user_id: str
+    tenant_id: str
+    region: str
+    status: SessionStatus
+    conversation_context: list[dict]    # Full message history
+    partial_output: dict | None         # In-progress generation state
+    billing_state: dict                 # Tokens consumed, cost, budget
+    checkpoint_timestamp: float
+    checkpoint_hash: str                # Integrity verification
+    ttl: int                            # Expiration for DynamoDB
+
+class CrossRegionSessionManager:
+    def __init__(self, dynamodb_client, health_checker, primary_region: str):
+        self.db = dynamodb_client
+        self.health = health_checker
+        self.primary_region = primary_region
+        self.checkpoint_interval_s = 30
+        self.active_sessions: dict[str, SessionCheckpoint] = {}
+
+    def checkpoint_session(self, session_id: str, context: list[dict],
+                           partial_output: dict | None,
+                           billing: dict) -> SessionCheckpoint:
+        """Serialize session state and write to global table."""
+        checkpoint = SessionCheckpoint(
+            session_id=session_id,
+            user_id=billing["user_id"],
+            tenant_id=billing["tenant_id"],
+            region=self.primary_region,
+            status=SessionStatus.CHECKPOINTED,
+            conversation_context=context,
+            partial_output=partial_output,
+            billing_state={
+                "tokens_input": billing["tokens_input"],
+                "tokens_output": billing["tokens_output"],
+                "cost_usd": billing["cost_usd"],
+                "budget_remaining": billing["budget_remaining"],
+            },
+            checkpoint_timestamp=time.time(),
+            checkpoint_hash=self._compute_hash(context, partial_output, billing),
+            ttl=int(time.time()) + 86400,  # 24h expiration
+        )
+
+        self.db.put_item(
+            TableName="SessionCheckpoints",
+            Item=self._serialize(checkpoint),
+        )
+
+        self.active_sessions[session_id] = checkpoint
+        return checkpoint
+
+    def _compute_hash(self, context: list[dict],
+                      partial_output: dict | None,
+                      billing: dict) -> str:
+        """SHA-256 hash of serialized state for integrity verification."""
+        payload = json.dumps({
+            "context": context,
+            "partial_output": partial_output,
+            "billing": billing,
+        }, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _serialize(self, checkpoint: SessionCheckpoint) -> dict:
+        """Convert checkpoint to DynamoDB item format."""
+        data = asdict(checkpoint)
+        data["status"] = checkpoint.status.value
+        return {"S": json.dumps(data)}
+```
+
+### 17.7.2 Region Failover Detection
+
+Health checks run every 10 seconds against the primary region's inference endpoint. Three consecutive failures trigger automatic traffic shifting to the nearest healthy region. The detection uses both TCP health checks (is the endpoint reachable?) and application-level checks (is the LLM inference pipeline returning valid responses?).
+
+```python
+class RegionHealthChecker:
+    def __init__(self, regions: list[str], failover_threshold: int = 3):
+        self.regions = regions
+        self.failover_threshold = failover_threshold
+        self.failure_counts: dict[str, int] = {r: 0 for r in regions}
+        self.healthy_region: str = regions[0]
+
+    async def check_region(self, region: str, endpoint: str) -> bool:
+        """Health check: TCP reachability + inference endpoint validation."""
+        try:
+            tcp_ok = await self._tcp_check(endpoint, port=443, timeout_s=3)
+            if not tcp_ok:
+                self._record_failure(region)
+                return False
+
+            # Application-level: send a trivial prompt, expect valid response
+            inference_ok = await self._inference_check(endpoint, timeout_s=10)
+            if not inference_ok:
+                self._record_failure(region)
+                return False
+
+            self._record_success(region)
+            return True
+        except Exception:
+            self._record_failure(region)
+            return False
+
+    def _record_failure(self, region: str):
+        self.failure_counts[region] += 1
+        if (self.failure_counts[region] >= self.failover_threshold
+                and self.healthy_region == region):
+            self.healthy_region = self._select_fallback(region)
+
+    def _record_success(self, region: str):
+        self.failure_counts[region] = 0
+
+    def _select_fallback(self, failed_region: str) -> str:
+        """Select nearest healthy region with lowest current load."""
+        candidates = [
+            r for r in self.regions
+            if r != failed_region and self.failure_counts[r] == 0
+        ]
+        if not candidates:
+            raise RuntimeError("All regions unhealthy — no failover target")
+        # Prefer same geography, then lowest load
+        return sorted(candidates, key=lambda r: self._region_load(r))[0]
+
+    def _region_load(self, region: str) -> float:
+        """Query cloud provider API for current GPU utilization."""
+        return 0.0  # Stub — implement against provider API
+```
+
+### 17.7.3 Session Resumption
+
+After failover, the new region loads the checkpoint from the global table. The system verifies the checkpoint hash for integrity, restores the conversation context, and resumes the session. Users see a brief "reconnecting" indicator, then continue seamlessly. The partial output state is restored if the generation was in progress, or the system re-initiates the request if the generation was lost.
+
+### 17.7.4 Billing Reconciliation
+
+The most critical concern during failover is avoiding duplicate token charges. If a request partially completes in Region A, gets checkpointed, then resumes in Region B, the billing state must reflect only the tokens actually consumed — not double-count the same generation. The billing checkpoint captures a monotonically increasing token counter per session. The failover region reads this counter and resumes from the last confirmed value, ignoring any partial increments from the failed region.
+
+```python
+class BillingReconciler:
+    def __init__(self, billing_db):
+        self.db = billing_db
+
+    def reconcile_after_failover(self, session_id: str,
+                                 checkpoint_billing: dict,
+                                 failed_region_partial: dict) -> dict:
+        """
+        After failover, reconcile billing to prevent duplicate charges.
+
+        checkpoint_billing: last confirmed billing state from global table
+        failed_region_partial: any token increments from the failed region
+        """
+        # Use the checkpoint as source of truth
+        reconciled = {
+            "tokens_input": checkpoint_billing["tokens_input"],
+            "tokens_output": checkpoint_billing["tokens_output"],
+            "cost_usd": checkpoint_billing["cost_usd"],
+            "budget_remaining": checkpoint_billing["budget_remaining"],
+        }
+
+        # The failed region's partial tokens are discarded
+        # because the generation was not completed or billed
+        if failed_region_partial:
+            discarded_tokens = (
+                failed_region_partial.get("tokens_output", 0)
+                - checkpoint_billing["tokens_output"]
+            )
+            if discarded_tokens > 0:
+                self.db.log_reconciliation(
+                    session_id=session_id,
+                    discarded_tokens=discarded_tokens,
+                    reason="failover_partial_discard",
+                    failed_region=failed_region_partial.get("region"),
+                )
+
+        return reconciled
+```
+
+**Key design principle:** The global table checkpoint is the single source of truth for billing. Any token increments that occurred after the last checkpoint in the failed region are discarded, not billed. This guarantees users never pay for work that was not delivered.
+
+---
+
+## 17.8 LoRA Hot-Swapping Infrastructure
+
+Enterprise customers want personalized models. A financial services firm needs its model fine-tuned on regulatory language. A healthcare company needs domain-specific medical terminology. A law firm needs case-specific reasoning patterns. LoRA adapters make this possible without storing thousands of full model copies — but serving thousands of adapters on shared GPU infrastructure requires a carefully designed loading and scheduling architecture.
+
+The core problem: a single A100 GPU has 80GB of VRAM. A 70B parameter base model consumes most of that. A LoRA adapter adds 100MB-2GB depending on rank and layers. You cannot keep all adapters loaded simultaneously. You must predict which adapters will be needed, stage them efficiently, and swap them with minimal latency impact.
+
+### 17.8.1 Adapter Loading Strategies
+
+Adapters are classified into three tiers based on access frequency:
+
+| Tier | Storage | Load Latency | Memory | Use Case |
+|------|---------|-------------|--------|----------|
+| **Hot** | GPU VRAM cache | 0ms (pre-loaded) | VRAM | Top 50 adapters by usage |
+| **Warm** | CPU DRAM staging | 5-15ms | System RAM | Next 500 adapters by predicted usage |
+| **Cold** | NVMe SSD | 50-200ms | Disk | Remaining adapters, rarely accessed |
+
+The loading strategy uses an LRU cache with popularity-weighted eviction. Hot adapters stay loaded. When a warm adapter is requested, it is streamed from CPU memory to GPU in under 15ms. Cold adapters require a disk read plus GPU transfer, taking 50-200ms.
+
+```python
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
+
+@dataclass
+class LoRAAdapter:
+    adapter_id: str
+    tenant_id: str
+    rank: int
+    target_modules: list[str]
+    parameters_mb: float
+    gpu_loaded: bool = False
+
+class LoRAInfrastructureManager:
+    def __init__(self, gpu_cache_size: int = 50,
+                 cpu_staging_size: int = 500):
+        self.gpu_cache_size = gpu_cache_size
+        self.cpu_staging_size = cpu_staging_size
+        # LRU caches: most-recently-used at the end
+        self.gpu_cache: OrderedDict[str, LoRAAdapter] = OrderedDict()
+        self.cpu_staging: OrderedDict[str, LoRAAdapter] = OrderedDict()
+        self.access_counts: dict[str, int] = {}
+        self.stats = {"gpu_hits": 0, "cpu_hits": 0, "cold_loads": 0}
+
+    def get_adapter(self, adapter_id: str) -> LoRAAdapter:
+        """Load adapter with tiered fallback."""
+        self.access_counts[adapter_id] = (
+            self.access_counts.get(adapter_id, 0) + 1
+        )
+
+        # Tier 1: GPU cache hit
+        if adapter_id in self.gpu_cache:
+            self.gpu_cache.move_to_end(adapter_id)
+            self.stats["gpu_hits"] += 1
+            return self.gpu_cache[adapter_id]
+
+        # Tier 2: CPU staging hit — promote to GPU
+        if adapter_id in self.cpu_staging:
+            adapter = self.cpu_staging.pop(adapter_id)
+            self._promote_to_gpu(adapter)
+            self.stats["cpu_hits"] += 1
+            return adapter
+
+        # Tier 3: Cold load from NVMe
+        adapter = self._load_from_nvme(adapter_id)
+        self._promote_to_gpu(adapter)
+        self.stats["cold_loads"] += 1
+        return adapter
+
+    def _promote_to_gpu(self, adapter: LoRAAdapter):
+        """Evict least-used adapter if cache is full."""
+        if len(self.gpu_cache) >= self.gpu_cache_size:
+            # Evict LRU adapter to CPU staging
+            evicted_id, evicted = self.gpu_cache.popitem(last=False)
+            evicted.gpu_loaded = False
+            if len(self.cpu_staging) >= self.cpu_staging_size:
+                self.cpu_staging.popitem(last=False)  # Drop oldest
+            self.cpu_staging[evicted_id] = evicted
+
+        adapter.gpu_loaded = True
+        self.gpu_cache[adapter.adapter_id] = adapter
+
+    def _load_from_nvme(self, adapter_id: str) -> LoRAAdapter:
+        """Load adapter weights from NVMe storage."""
+        # In production: read from S3 or local NVMe path
+        return LoRAAdapter(
+            adapter_id=adapter_id,
+            tenant_id="unknown",
+            rank=16,
+            target_modules=["q_proj", "v_proj"],
+            parameters_mb=128.0,
+        )
+
+    def predict_popularity(self, adapter_id: str,
+                           historical_access: list[float]) -> float:
+        """Predict future access probability using exponential decay."""
+        if not historical_access:
+            return 0.0
+        now = time.time()
+        weighted = sum(
+            count * (2 ** ((now - timestamp) / 86400))
+            for timestamp, count in historical_access
+        )
+        return weighted / len(historical_access)
+```
+
+### 17.8.2 S-LoRA / Punica Architecture
+
+The S-LoRA paper (Sheng et al., 2023) introduced the key insight: multiple LoRA adapters can share the same base model on a single GPU by batching adapter computations. The Punica library implements this through a custom CUDA kernel that processes multiple adapters in a single GPU pass, rather than loading and unloading adapters sequentially.
+
+The architecture separates the base model weights (shared, loaded once) from the adapter weights (per-tenant, loaded on demand). During inference, the base model runs for all requests in a batch. The LoRA adapters are applied as a low-rank modification to the hidden states, computed by the Punica kernel for each request's specific adapter.
+
+This reduces per-adapter GPU memory overhead to near-zero for the base model and enables batching of 64+ concurrent requests across different adapters on a single A100.
+
+### 17.8.3 Cold Start Mitigation
+
+The first request for an adapter always hits cold storage. Strategies to minimize the impact:
+
+1. **Predictive pre-loading:** Use the popularity predictor to warm adapters into CPU staging before expected demand (e.g., morning ramp-up at a financial firm).
+2. **Request coalescing:** If multiple requests for the same cold adapter arrive simultaneously, load once and serve all from the single load.
+3. **Graceful degradation:** Serve the base model immediately (without adapter personalization) while loading the adapter in the background. The first response uses the base model; subsequent responses use the personalized adapter.
+4. **Streaming load:** Begin serving partial results from the base model while the adapter loads. The adapter takes effect mid-generation for the remainder of the output.
+
+```python
+class ColdStartMitigator:
+    def __init__(self, infrastructure: LoRAInfrastructureManager):
+        self.infra = infrastructure
+        self.pending_loads: dict[str, list] = {}  # adapter_id -> callbacks
+
+    async def get_adapter_with_cold_start_handling(
+        self, adapter_id: str
+    ) -> LoRAAdapter:
+        """Handle cold starts with coalescing and graceful degradation."""
+        # Fast path: already loaded
+        try:
+            return self.infra.get_adapter(adapter_id)
+        except KeyError:
+            pass
+
+        # Coalesce concurrent requests for the same adapter
+        if adapter_id in self.pending_loads:
+            # Another request is already loading this adapter
+            import asyncio
+            future = asyncio.get_event_loop().create_future()
+            self.pending_loads[adapter_id].append(future)
+            return await future
+
+        # We are the first requester — initiate load
+        self.pending_loads[adapter_id] = []
+        adapter = self.infra.get_adapter(adapter_id)
+
+        # Wake up all waiters
+        for future in self.pending_loads.pop(adapter_id, []):
+            future.set_result(adapter)
+
+        return adapter
+```
+
+**Performance impact of cold starts by adapter size:**
+
+| Adapter Size | NVMe Load | CPU→GPU Transfer | Total Cold Start | Served Without Adapter |
+|-------------|-----------|------------------|-----------------|----------------------|
+| 16-rank, 2 modules | 12ms | 3ms | 15ms | Base model fallback |
+| 64-rank, 4 modules | 45ms | 8ms | 53ms | Base model fallback |
+| 128-rank, 8 modules | 110ms | 15ms | 125ms | Base model fallback |
+| 256-rank, all modules | 180ms | 25ms | 205ms | Base model fallback |
+
+---
+
+## 17.9 Distributed Lineage Tracking
+
+Regulated industries — financial services (SEC Rule 17a-4), healthcare (HIPAA), publicly traded companies (SOX) — require organizations to prove exactly which inputs produced which outputs. For a GenAI system generating investment advice, clinical summaries, or audit opinions, this means tracking which model version, which prompt template, which system configuration, and which input data contributed to every sentence in every generated output.
+
+This is not logging. Logging records that something happened. Lineage tracking records exactly why the output looks the way it does, at a granularity sufficient for regulatory audit.
+
+### 17.9.1 Content-Hash-Based Lineage
+
+Every input component is hashed independently. The model version, prompt template, system snapshot (tool definitions, memory state, configuration), and user input each produce a SHA-256 hash. These hashes are combined into a composite lineage hash that uniquely identifies the generation context. Any change to any input produces a different lineage hash.
+
+```python
+import hashlib
+import json
+import time
+from dataclasses import dataclass, field, asdict
+
+@dataclass
+class LineageRecord:
+    request_id: str
+    timestamp: float
+    model_version_hash: str       # Hash of model ID + checkpoint hash
+    prompt_template_hash: str     # Hash of prompt template content
+    system_snapshot_hash: str     # Hash of tools, memory, config state
+    input_data_hash: str          # Hash of user input + context
+    composite_lineage_hash: str   # Hash of all component hashes
+    output_text: str
+    output_sentences: list[str]
+    sentence_hashes: list[str]    # Per-sentence lineage hashes
+    metadata: dict = field(default_factory=dict)
+
+class LineageTracker:
+    def __init__(self, audit_store):
+        self.store = audit_store
+
+    def compute_component_hash(self, component_type: str,
+                                content: str | dict) -> str:
+        """Hash a single input component."""
+        if isinstance(content, dict):
+            serialized = json.dumps(content, sort_keys=True)
+        else:
+            serialized = content
+        payload = f"{component_type}:{serialized}"
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def record_generation(self, request_id: str,
+                          model_version: str,
+                          prompt_template: str,
+                          system_config: dict,
+                          user_input: str,
+                          output: str) -> LineageRecord:
+        """Create a full lineage record for a generated output."""
+        # Hash each input component independently
+        model_hash = self.compute_component_hash("model", model_version)
+        prompt_hash = self.compute_component_hash("prompt", prompt_template)
+        system_hash = self.compute_component_hash("system", system_config)
+        input_hash = self.compute_component_hash("input", user_input)
+
+        # Composite hash: uniquely identifies this generation context
+        composite = self.compute_component_hash("composite", {
+            "model": model_hash,
+            "prompt": prompt_hash,
+            "system": system_hash,
+            "input": input_hash,
+        })
+
+        # Sentence-level attribution
+        sentences = self._split_sentences(output)
+        sentence_hashes = [
+            self.compute_component_hash(f"sentence:{i}", {
+                "composite": composite,
+                "sentence": s,
+                "position": i,
+            })
+            for i, s in enumerate(sentences)
+        ]
+
+        record = LineageRecord(
+            request_id=request_id,
+            timestamp=time.time(),
+            model_version_hash=model_hash,
+            prompt_template_hash=prompt_hash,
+            system_snapshot_hash=system_hash,
+            input_data_hash=input_hash,
+            composite_lineage_hash=composite,
+            output_text=output,
+            output_sentences=sentences,
+            sentence_hashes=sentence_hashes,
+        )
+
+        # Persist to immutable store
+        self.store.write(record)
+        return record
+
+    def _split_sentences(self, text: str) -> list[str]:
+        """Split output into sentences for per-sentence attribution."""
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        return [s for s in sentences if s]
+
+    def trace_sentence(self, sentence_hash: str) -> dict:
+        """Given a sentence hash, retrieve the full lineage chain."""
+        return self.store.lookup_by_sentence_hash(sentence_hash)
+```
+
+### 17.9.2 Immutable Audit Store
+
+Lineage records are written to an append-only store backed by S3 with versioning enabled. Each record is stored as a JSON object with the request ID as the key. S3 versioning ensures that even if a record is overwritten (which should never happen), the previous version is preserved. The store is write-once, read-many — no record can be modified or deleted.
+
+```python
+class ImmutableAuditStore:
+    def __init__(self, s3_client, bucket: str):
+        self.s3 = s3_client
+        self.bucket = bucket
+
+    def write(self, record: LineageRecord):
+        """Write lineage record to immutable S3 store."""
+        key = f"lineage/{record.timestamp}/{record.request_id}.json"
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=json.dumps(asdict(record), indent=2),
+            ContentType="application/json",
+            ObjectLockMode="COMPLIANCE",  # Prevent deletion for retention period
+            ObjectLockRetainUntilDate=self._retention_date(),
+            Metadata={
+                "composite-hash": record.composite_lineage_hash,
+                "model-hash": record.model_version_hash,
+            },
+        )
+
+    def lookup_by_request_id(self, request_id: str) -> dict | None:
+        """Retrieve full lineage record by request ID."""
+        # In production: use DynamoDB index for O(1) lookup
+        return None
+
+    def lookup_by_sentence_hash(self, sentence_hash: str) -> dict:
+        """Trace a specific sentence back to its full lineage."""
+        # Query secondary index: sentence_hash -> request_id -> full record
+        return {"sentence_hash": sentence_hash, "status": "indexed"}
+
+    def _retention_date(self):
+        """7-year retention for SEC compliance."""
+        from datetime import datetime, timedelta
+        return datetime.utcnow() + timedelta(days=7 * 365)
+```
+
+### 17.9.3 Example Audit Log Entry
+
+When a compliance officer investigates a generated investment recommendation, they query the audit store by request ID and receive a complete lineage chain:
+
+```json
+{
+  "request_id": "req-2024-0715-a7f3",
+  "timestamp": 1721030400.0,
+  "lineage": {
+    "model_version": "claude-3-opus-20240229",
+    "model_version_hash": "a1b2c3d4e5f6...",
+    "prompt_template": "templates/investment-advisor-v2.3",
+    "prompt_template_hash": "f6e5d4c3b2a1...",
+    "system_config": {
+      "tools": ["market-data-api", "portfolio-tracker"],
+      "memory_scope": "user:advisor-john",
+      "risk_tolerance": "moderate"
+    },
+    "system_snapshot_hash": "1a2b3c4d5e6f...",
+    "input": "Should I increase my allocation to emerging markets given the current interest rate environment?",
+    "input_data_hash": "6f5e4d3c2b1a...",
+    "composite_lineage_hash": "deadbeef1234..."
+  },
+  "output": "Based on the current interest rate trajectory and your moderate risk tolerance, increasing emerging market allocation by 5-10% could provide diversification benefits. The Federal Reserve's projected rate cuts in Q3 2024 historically correlate with capital flows toward emerging market equities.",
+  "output_sentences": [
+    "Based on the current interest rate trajectory and your moderate risk tolerance, increasing emerging market allocation by 5-10% could provide diversification benefits.",
+    "The Federal Reserve's projected rate cuts in Q3 2024 historically correlate with capital flows toward emerging market equities."
+  ],
+  "sentence_lineage": [
+    {
+      "sentence_index": 0,
+      "sentence_hash": "a1b2c3...",
+      "derived_from_components": ["input_data_hash", "system_snapshot_hash"],
+      "context_window": "User risk profile + market data tool output"
+    },
+    {
+      "sentence_index": 1,
+      "sentence_hash": "d4e5f6...",
+      "derived_from_components": ["input_data_hash", "model_version_hash"],
+      "context_window": "Model parametric knowledge + input query"
+    }
+  ],
+  "compliance": {
+    "SEC_Rule_17a4": "audit_trail_complete",
+    "SOX_Section_404": "input_output_lineage_verified",
+    "retention_until": "2031-07-15T00:00:00Z"
+  }
+}
+```
+
+This record proves: (1) which model produced the output, (2) which prompt template guided the generation, (3) what tools and memory were available, (4) exactly what the user asked, and (5) how each sentence in the output relates to the inputs. For SEC audits, this is the difference between a months-long manual review and a minutes-long database query.
+
+---
+
+## 17.10 Key Takeaways
 
 1. **The AI Gateway is the foundation.** Centralize authentication, authorization, rate limiting, cost tracking, and model routing in one place. Without it, every application reinvents these concerns inconsistently.
 
@@ -1237,7 +1808,7 @@ class TestEndToEndPlatform:
 
 ---
 
-## 17.10 Further Reading
+## 17.11 Further Reading
 
 - **"Building Microservices" by Sam Newman** — Chapter 4 (Designing Services) covers the service decomposition patterns directly applicable to platform architecture.
 

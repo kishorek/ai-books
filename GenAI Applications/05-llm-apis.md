@@ -1217,7 +1217,706 @@ def test_provider_parity():
 
 ---
 
-## 5.11 Key Takeaways
+## 5.11 Semantic Parity Across Providers
+
+When building a multi-provider fallback system, the assumption that providers are interchangeable is dangerously wrong. OpenAI, Anthropic, and DeepSeek each interpret system prompts, tool definitions, and structured output requests differently. A fallback that silently produces degraded behavior is worse than a visible failure. Achieving semantic parity -- consistent behavior across providers for the same logical request -- requires explicit normalization at the adapter layer.
+
+### 5.11.1 Provider-Specific API Differences
+
+The three major providers diverge in ways that affect both request construction and response interpretation:
+
+| Dimension | OpenAI | Anthropic | DeepSeek |
+|-----------|--------|-----------|----------|
+| System prompt | `messages[0]` with `role: "system"` | Separate `system` parameter (top-level) | Same as OpenAI (OpenAI-compatible) |
+| Tool definitions | `tools` array, `type: "function"` | `tools` array, `type: "function"` (different schema nesting) | Same as OpenAI |
+| Tool call response | `message.tool_calls[].function.arguments` (JSON string) | `message.content[].input` (parsed object) | Same as OpenAI |
+| Structured output | `response_format: { type: "json_schema", schema }` | Native JSON mode + prompt instructions | `response_format: { type: "json_object" }` |
+| Stop sequences | `stop` parameter (array of strings) | `stop_sequences` parameter | Same as OpenAI |
+| Temperature range | 0.0 - 2.0 | 0.0 - 1.0 | 0.0 - 2.0 |
+| Max tokens | `max_tokens` (response limit) | `max_tokens` (required, response limit) | `max_tokens` (response limit) |
+| Role naming | `user`, `assistant`, `system`, `tool` | `user`, `assistant` (system separate) | Same as OpenAI |
+
+These differences are not cosmetic. A system prompt embedded in the messages array for Anthropic is silently ignored. A tool call response parsed as a JSON string where a parsed object is expected throws a runtime exception. Parity requires a translation layer.
+
+### 5.11.2 ProviderParityAdapter
+
+```python
+import json
+import hashlib
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass
+class NormalizedRequest:
+    """Provider-agnostic request representation."""
+    system_prompt: str | None
+    messages: list[dict]
+    tools: list[dict] | None
+    response_format: dict | None
+    temperature: float
+    max_tokens: int
+    stop_sequences: list[str]
+
+@dataclass
+class NormalizedResponse:
+    """Provider-agnostic response representation."""
+    content: str
+    tool_calls: list[dict] | None
+    finish_reason: str
+    input_tokens: int
+    output_tokens: int
+    provider: str
+    raw: Any  # Original provider response for debugging
+
+class ProviderParityAdapter:
+    """Normalizes requests and responses across OpenAI, Anthropic, and DeepSeek."""
+
+    def normalize_request(
+        self,
+        request: NormalizedRequest,
+        provider: str,
+    ) -> dict:
+        """Translate a normalized request into provider-specific format."""
+        if provider == "anthropic":
+            return self._to_anthropic(request)
+        elif provider in ("openai", "deepseek"):
+            return self._to_openai(request)
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+
+    def _to_anthropic(self, req: NormalizedRequest) -> dict:
+        # Anthropic: system prompt is a top-level parameter
+        params: dict[str, Any] = {
+            "model": "claude-sonnet-4-6-20250514",
+            "messages": [{"role": m["role"], "content": m["content"]} for m in req.messages],
+            "max_tokens": req.max_tokens,
+            "temperature": min(req.temperature, 1.0),  # Anthropic max is 1.0
+        }
+        if req.system_prompt:
+            params["system"] = req.system_prompt
+        if req.tools:
+            params["tools"] = [
+                {
+                    "name": t["function"]["name"],
+                    "description": t["function"].get("description", ""),
+                    "input_schema": t["function"].get("parameters", {}),
+                }
+                for t in req.tools
+            ]
+        if req.response_format:
+            params["response_format"] = {"type": "json"}
+        if req.stop_sequences:
+            params["stop_sequences"] = req.stop_sequences
+        return params
+
+    def _to_openai(self, req: NormalizedRequest) -> dict:
+        # OpenAI / DeepSeek: system prompt goes in messages array
+        messages = []
+        if req.system_prompt:
+            messages.append({"role": "system", "content": req.system_prompt})
+        messages.extend(req.messages)
+
+        params: dict[str, Any] = {
+            "model": "gpt-4o",
+            "messages": messages,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+        }
+        if req.tools:
+            params["tools"] = req.tools
+        if req.response_format:
+            params["response_format"] = req.response_format
+        if req.stop_sequences:
+            params["stop"] = req.stop_sequences
+        return params
+
+    def normalize_response(
+        self,
+        raw_response: Any,
+        provider: str,
+    ) -> NormalizedResponse:
+        """Translate provider-specific response into normalized format."""
+        if provider == "anthropic":
+            return self._from_anthropic(raw_response)
+        elif provider in ("openai", "deepseek"):
+            return self._from_openai(raw_response)
+        raise ValueError(f"Unknown provider: {provider}")
+
+    def _from_anthropic(self, resp: Any) -> NormalizedResponse:
+        content = ""
+        tool_calls = []
+        for block in resp.content:
+            if block.type == "text":
+                content = block.text
+            elif block.type == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "function": {
+                        "name": block.name,
+                        "arguments": json.dumps(block.input),
+                    },
+                })
+        return NormalizedResponse(
+            content=content,
+            tool_calls=tool_calls or None,
+            finish_reason=resp.stop_reason or "stop",
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            provider="anthropic",
+            raw=resp,
+        )
+
+    def _from_openai(self, resp: Any) -> NormalizedResponse:
+        message = resp.choices[0].message
+        tool_calls = None
+        if message.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,  # Already JSON string
+                    },
+                }
+                for tc in message.tool_calls
+            ]
+        return NormalizedResponse(
+            content=message.content or "",
+            tool_calls=tool_calls,
+            finish_reason=resp.choices[0].finish_reason or "stop",
+            input_tokens=resp.usage.prompt_tokens,
+            output_tokens=resp.usage.completion_tokens,
+            provider="openai",
+            raw=resp,
+        )
+```
+
+### 5.11.3 Tool Schema Normalization
+
+Tool definitions require careful normalization because providers expect different JSON Schema structures:
+
+```python
+def normalize_tool_schema(openai_tools: list[dict], target_provider: str) -> list[dict]:
+    """Convert OpenAI-format tool definitions to the target provider's format."""
+    if target_provider == "openai":
+        return openai_tools  # Already in OpenAI format
+
+    if target_provider == "anthropic":
+        return [
+            {
+                "name": tool["function"]["name"],
+                "description": tool["function"].get("description", ""),
+                "input_schema": tool["function"].get("parameters", {
+                    "type": "object",
+                    "properties": {},
+                }),
+            }
+            for tool in openai_tools
+        ]
+
+    if target_provider == "deepseek":
+        # DeepSeek uses OpenAI-compatible format but with limitations:
+        # - No nested tool calling
+        # - No parallel tool calls
+        # Simplify to flat schemas
+        simplified = []
+        for tool in openai_tools:
+            params = tool["function"].get("parameters", {})
+            # Remove unsupported nested structures
+            cleaned_params = _flatten_schema(params)
+            simplified.append({
+                "type": "function",
+                "function": {
+                    "name": tool["function"]["name"],
+                    "description": tool["function"].get("description", ""),
+                    "parameters": cleaned_params,
+                },
+            })
+        return simplified
+
+    raise ValueError(f"Unsupported provider: {target_provider}")
+
+
+def _flatten_schema(schema: dict, depth: int = 0) -> dict:
+    """Remove nested allOf/oneOf constructs that some providers reject."""
+    if depth > 3:
+        return {"type": "object", "properties": {}}
+
+    result = dict(schema)
+    if "properties" in result:
+        result["properties"] = {
+            k: _flatten_schema(v, depth + 1)
+            for k, v in result["properties"].items()
+        }
+    # Drop unsupported constructs
+    for key in ("allOf", "oneOf", "anyOf", "$defs", "additionalProperties"):
+        result.pop(key, None)
+    return result
+```
+
+### 5.11.4 Response Format Parity
+
+Structured output requires different strategies per provider:
+
+```python
+def build_structured_output_params(
+    schema: dict,
+    provider: str,
+) -> dict:
+    """Build provider-specific structured output parameters."""
+    if provider == "openai":
+        return {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output",
+                    "strict": True,
+                    "schema": schema,
+                },
+            }
+        }
+
+    if provider == "anthropic":
+        # Anthropic does not have native JSON schema enforcement.
+        # Use JSON mode and enforce schema via system prompt.
+        return {
+            "response_format": {"type": "json"},
+            "_system_instruction": (
+                "You must respond with valid JSON matching this exact schema: "
+                + json.dumps(schema)
+                + ". No markdown, no explanation, only JSON."
+            ),
+        }
+
+    if provider == "deepseek":
+        # DeepSeek supports basic JSON mode but not schema enforcement.
+        return {
+            "response_format": {"type": "json_object"},
+            "_system_instruction": (
+                "Respond with valid JSON matching: " + json.dumps(schema)
+            ),
+        }
+
+    raise ValueError(f"Unsupported provider: {provider}")
+```
+
+### 5.11.5 Parity Testing
+
+Verify that providers produce equivalent results for the same logical input:
+
+```python
+def test_parity_across_providers():
+    """Verify semantic parity for a standard extraction task."""
+    adapter = ProviderParityAdapter()
+
+    request = NormalizedRequest(
+        system_prompt="Extract structured data from the input.",
+        messages=[{
+            "role": "user",
+            "content": "John Doe, age 34, lives in New York, works at Acme Corp.",
+        }],
+        tools=None,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "person",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "integer"},
+                        "city": {"type": "string"},
+                        "employer": {"type": "string"},
+                    },
+                    "required": ["name", "age", "city", "employer"],
+                },
+            },
+        },
+        temperature=0.0,
+        max_tokens=256,
+        stop_sequences=[],
+    )
+
+    results = {}
+    for provider_name in ("openai", "anthropic", "deepseek"):
+        params = adapter.normalize_request(request, provider_name)
+        raw = call_provider(provider_name, params)
+        normalized = adapter.normalize_response(raw, provider_name)
+        parsed = json.loads(normalized.content)
+        results[provider_name] = parsed
+
+    # All providers should produce equivalent structured output
+    assert results["openai"]["name"] == "John Doe"
+    assert results["anthropic"]["name"] == "John Doe"
+    assert results["deepseek"]["name"] == "John Doe"
+    assert results["openai"]["age"] == 34
+    assert results["anthropic"]["age"] == 34
+```
+
+### 5.11.6 Production Checklist
+
+Before enabling multi-provider fallback in production:
+
+1. **Verify system prompt delivery.** Log the system prompt as received by each provider. Anthropic silently drops system prompts embedded in the messages array.
+2. **Test tool call parsing.** Anthropic returns tool inputs as parsed objects; OpenAI returns them as JSON strings. Normalize both to the same format before application code processes them.
+3. **Validate structured output.** Run the same 50+ example inputs through each provider and verify schema conformance. Expect 95%+ compliance from OpenAI, 90%+ from Anthropic, 80%+ from DeepSeek.
+4. **Check temperature scaling.** Anthropic's temperature range is 0-1; OpenAI and DeepSeek use 0-2. Map your production temperature to each provider's range.
+5. **Monitor token counts.** The same logical content may tokenize differently across providers. Calibrate your cost models per provider.
+
+---
+
+## 5.12 Distributed Context Caching
+
+Multi-turn conversational applications accumulate context rapidly. A 10K-token system prompt with 20 turns of history can reach 100K+ tokens, and re-sending this full context on every API call is both expensive and slow. Distributed context caching solves this by storing pre-processed context segments at edge nodes, reducing both cost and latency for repeated or shared context patterns.
+
+### 5.12.1 Cache Key Design
+
+Cache keys must be deterministic and content-addressed to ensure correctness across distributed nodes:
+
+```python
+import hashlib
+import json
+from typing import Any
+
+class CacheKeyBuilder:
+    """Build deterministic cache keys for context segments."""
+
+    @staticmethod
+    def system_prompt_key(
+        system_prompt: str,
+        provider: str,
+        model: str,
+    ) -> str:
+        """Hash of system prompt + provider + model for provider-specific caching."""
+        content = f"{provider}:{model}:{system_prompt}"
+        return f"sys:{hashlib.sha256(content.encode()).hexdigest()[:16]}"
+
+    @staticmethod
+    def conversation_key(
+        system_prompt_hash: str,
+        user_id: str,
+        turn_count: int,
+        message_hash: str,
+    ) -> str:
+        """Hierarchical key: system hash -> user -> turn -> message content."""
+        return f"conv:{system_prompt_hash}:{user_id}:{turn_count}:{message_hash[:8]}"
+
+    @staticmethod
+    def tool_result_key(
+        tool_name: str,
+        tool_args_hash: str,
+        result_hash: str,
+    ) -> str:
+        """Cache key for tool call results to avoid re-execution."""
+        return f"tool:{tool_name}:{tool_args_hash[:8]}:{result_hash[:8]}"
+
+    @staticmethod
+    def _hash_content(content: str) -> str:
+        return hashlib.sha256(content.encode()).hexdigest()
+```
+
+### 5.12.2 DistributedCacheManager
+
+```python
+import time
+import json
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass, field
+
+@dataclass
+class CacheEntry:
+    key: str
+    value: Any
+    created_at: float
+    ttl_seconds: float
+    hit_count: int = 0
+    last_accessed: float = 0.0
+
+    @property
+    def is_expired(self) -> bool:
+        return time.time() - self.created_at > self.ttl_seconds
+
+    @property
+    def age_seconds(self) -> float:
+        return time.time() - self.created_at
+
+
+class DistributedCacheManager:
+    """
+    Edge-local cache with eventual consistency across nodes.
+
+    Each edge node maintains its own LRU cache. Synchronization
+    happens asynchronously via a message bus (Redis Pub/Sub, Kafka,
+    or NATS). Writes propagate to all nodes; reads are served locally.
+    """
+
+    # TTL strategy by data type
+    TTL_CONFIG = {
+        "system_prompt": 3600 * 24,      # 24 hours (rarely changes)
+        "conversation_turn": 3600,       # 1 hour (active sessions)
+        "tool_result": 3600 * 6,         # 6 hours (deterministic outputs)
+        "user_profile": 3600 * 2,        # 2 hours (moderate update frequency)
+        "embedding": 3600 * 24 * 7,      # 7 days (immutable once computed)
+        "rate_limit_state": 60,          # 1 minute (high churn)
+    }
+
+    def __init__(
+        self,
+        node_id: str,
+        max_entries: int = 10_000,
+        sync_bus=None,  # Redis/Kafka/NATS client
+    ):
+        self.node_id = node_id
+        self.max_entries = max_entries
+        self.sync_bus = sync_bus
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._lock = threading.Lock()
+        self._stats = {"hits": 0, "misses": 0, "evictions": 0}
+
+    def get(self, key: str) -> Any | None:
+        """Retrieve from local cache. Returns None on miss or expiry."""
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                self._stats["misses"] += 1
+                return None
+            if entry.is_expired:
+                del self._cache[key]
+                self._stats["misses"] += 1
+                return None
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            entry.hit_count += 1
+            entry.last_accessed = time.time()
+            self._stats["hits"] += 1
+            return entry.value
+
+    def put(
+        self,
+        key: str,
+        value: Any,
+        data_type: str = "conversation_turn",
+        ttl_override: float | None = None,
+    ) -> None:
+        """Store in local cache and broadcast to other nodes."""
+        ttl = ttl_override or self.TTL_CONFIG.get(data_type, 3600)
+        entry = CacheEntry(
+            key=key,
+            value=value,
+            created_at=time.time(),
+            ttl_seconds=ttl,
+            last_accessed=time.time(),
+        )
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self._cache[key] = entry
+            else:
+                if len(self._cache) >= self.max_entries:
+                    evicted_key, _ = self._cache.popitem(last=False)
+                    self._stats["evictions"] += 1
+                self._cache[key] = entry
+
+        # Async broadcast to other edge nodes
+        if self.sync_bus:
+            self._broadcast_put(key, value, data_type, ttl)
+
+    def invalidate(self, key: str) -> None:
+        """Remove from local cache and broadcast invalidation."""
+        with self._lock:
+            self._cache.pop(key, None)
+        if self.sync_bus:
+            self._broadcast_invalidate(key)
+
+    def _broadcast_put(self, key: str, value: Any, data_type: str, ttl: float) -> None:
+        """Publish cache update to sync bus for other nodes."""
+        message = json.dumps({
+            "event": "cache_put",
+            "node_id": self.node_id,
+            "key": key,
+            "value": value,
+            "data_type": data_type,
+            "ttl": ttl,
+            "timestamp": time.time(),
+        })
+        # Non-blocking publish; failures are logged but do not block the caller
+        try:
+            self.sync_bus.publish("cache_sync", message)
+        except Exception:
+            pass  # Log in production; eventual consistency handles this
+
+    def _broadcast_invalidate(self, key: str) -> None:
+        """Publish cache invalidation to sync bus."""
+        message = json.dumps({
+            "event": "cache_invalidate",
+            "node_id": self.node_id,
+            "key": key,
+            "timestamp": time.time(),
+        })
+        try:
+            self.sync_bus.publish("cache_sync", message)
+        except Exception:
+            pass
+
+    def stats(self) -> dict:
+        """Return cache performance metrics."""
+        total = self._stats["hits"] + self._stats["misses"]
+        hit_rate = self._stats["hits"] / total if total > 0 else 0.0
+        return {
+            **self._stats,
+            "total_requests": total,
+            "hit_rate": round(hit_rate, 4),
+            "entries": len(self._cache),
+            "memory_pressure": len(self._cache) / self.max_entries,
+        }
+```
+
+### 5.12.3 TTL Strategy by Data Type
+
+Different data types have different volatility. The TTL configuration directly impacts cache hit rate and data staleness:
+
+| Data Type | TTL | Rationale | Staleness Risk |
+|-----------|-----|-----------|----------------|
+| System prompt | 24 hours | Changes on deploy, not per-request | Low -- versioned per deployment |
+| Conversation turn | 1 hour | Active sessions; abandoned sessions expire naturally | Low -- sessions are ephemeral |
+| Tool result | 6 hours | Deterministic for same inputs; external state may change | Medium -- stale if underlying data updates |
+| User profile | 2 hours | Moderate update frequency; stale profiles cause incorrect personalization | Medium |
+| Embedding vector | 7 days | Immutable once computed; model version changes invalidate | Very low |
+| Rate limit state | 1 minute | High churn; must reflect real-time provider state | High -- intentional short TTL |
+
+### 5.12.4 Architectural Pattern
+
+The distributed cache operates as an edge-sidecar pattern alongside the LLM API gateway:
+
+```
+                    +------------------+
+                    |   Origin Cache   |
+                    |  (Central Store) |
+                    +--------+---------+
+                             |
+              +--------------+--------------+
+              |              |              |
+     +--------v---+  +------v------+  +----v--------+
+     |  Edge Node  |  |  Edge Node  |  |  Edge Node  |
+     |  (US-East)  |  |  (EU-West)  |  |  (AP-South) |
+     |  LRU Cache  |  |  LRU Cache  |  |  LRU Cache  |
+     +------+------+  +------+------+  +------+------+
+            |                |                |
+     +------v------+  +------v------+  +------v------+
+     |  API Gateway |  |  API Gateway |  |  API Gateway |
+     +------+-------+  +------+-------+  +------+------+
+            |                |                |
+     +------v------+  +------v------+  +------v------+
+     | LLM Provider |  | LLM Provider |  | LLM Provider |
+     |  (OpenAI)    |  | (Anthropic)  |  | (DeepSeek)  |
+     +--------------+  +--------------+  +-------------+
+
+     Event Flow:
+     1. Client request hits nearest edge node
+     2. Edge checks local LRU cache for context segments
+     3. Cache hit: serve locally, skip upstream call
+     4. Cache miss: fetch from provider, cache result, broadcast to other nodes
+     5. Other nodes receive broadcast, update their local caches
+```
+
+### 5.12.5 Cache Warming for Predictable Workloads
+
+For applications with predictable access patterns (enterprise SaaS with known clients, scheduled batch jobs), pre-warming the cache eliminates cold-start latency:
+
+```python
+class CacheWarmer:
+    """Pre-populate cache for known workloads."""
+
+    def __init__(self, cache: DistributedCacheManager):
+        self.cache = cache
+
+    def warm_system_prompts(
+        self,
+        prompts: dict[str, str],
+        provider: str,
+        model: str,
+    ) -> int:
+        """Cache system prompts before first request arrives."""
+        warmed = 0
+        for prompt_name, prompt_text in prompts.items():
+            key = CacheKeyBuilder.system_prompt_key(prompt_text, provider, model)
+            self.cache.put(key, prompt_text, data_type="system_prompt")
+            warmed += 1
+        return warmed
+
+    def warm_user_profiles(
+        self,
+        profiles: dict[str, dict],
+    ) -> int:
+        """Cache user profiles for active sessions."""
+        warmed = 0
+        for user_id, profile in profiles.items():
+            key = f"profile:{user_id}"
+            self.cache.put(key, profile, data_type="user_profile")
+            warmed += 1
+        return warmed
+
+    def warm_tool_results(
+        self,
+        tool_cache: dict[str, Any],
+    ) -> int:
+        """Cache known tool results for deterministic operations."""
+        warmed = 0
+        for cache_key, result in tool_cache.items():
+            self.cache.put(cache_key, result, data_type="tool_result")
+            warmed += 1
+        return warmed
+```
+
+### 5.12.6 Monitoring and Observability
+
+Cache effectiveness is measured through hit rate, latency reduction, and cost savings:
+
+```python
+class CacheMonitor:
+    """Track cache performance and cost impact."""
+
+    def __init__(self, cache: DistributedCacheManager):
+        self.cache = cache
+        self.cost_per_1k_input_tokens = {
+            "openai": 0.0025,
+            "anthropic": 0.003,
+            "deepseek": 0.00027,
+        }
+
+    def report(self, provider: str, avg_tokens_per_request: int) -> dict:
+        stats = self.cache.stats()
+        cost_per_call = self.cost_per_1k_input_tokens.get(provider, 0.003)
+        tokens_saved = stats["hits"] * avg_tokens_per_request
+        cost_saved = (tokens_saved / 1000) * cost_per_call
+
+        return {
+            "cache_hit_rate": stats["hit_rate"],
+            "total_hits": stats["hits"],
+            "total_misses": stats["misses"],
+            "tokens_saved": tokens_saved,
+            "cost_saved_usd": round(cost_saved, 4),
+            "entries_cached": stats["entries"],
+            "eviction_rate": stats["evictions"],
+            "memory_pressure": round(stats["memory_pressure"], 2),
+        }
+```
+
+### 5.12.7 Eventual Consistency Guarantees
+
+Edge node synchronization follows eventual consistency with these invariants:
+
+1. **Convergence.** All nodes eventually reach the same state for the same key, assuming no new writes. Broadcast messages are idempotent.
+2. **Read-your-writes.** A node that writes a value always reads its own write immediately from local cache. Other nodes may lag by the broadcast propagation delay (typically <100ms on same-region infrastructure).
+3. **Bounded staleness.** TTLs bound the maximum age of stale data. For critical data (rate limit state, active sessions), TTLs are set aggressively low.
+4. **Conflict resolution.** Last-writer-wins with timestamp-based ordering. Since cache values are immutable snapshots (not incrementing counters), conflicts are rare and benign.
+
+For cross-region deployments with higher propagation delay, consider a hierarchical sync model where each region has a regional aggregator that coordinates intra-region consistency, and cross-region sync happens asynchronously at lower frequency.
+
+---
+
+## 5.13 Key Takeaways
 
 1. **Provider abstraction is essential -- build it early, not after you are locked in.** The cost of migrating from a monolithic provider dependency to an abstracted interface grows exponentially with codebase size. Invest in the abstraction layer before writing your first production prompt.
 
@@ -1241,7 +1940,7 @@ def test_provider_parity():
 
 ---
 
-## 5.12 Further Reading
+## 5.14 Further Reading
 
 - **"Designing Data-Intensive Applications" by Martin Kleppmann** -- Chapter 5 (Replication) and Chapter 6 (Partitioning) provide the distributed systems foundation for understanding provider failover and multi-region deployment patterns.
 

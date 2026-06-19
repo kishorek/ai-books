@@ -990,7 +990,461 @@ def test_tool_error_handling(agent):
 
 ---
 
-## 9.7 Key Takeaways
+## 9.7 Parallel Tool Failure Recovery
+
+When a model issues multiple tool calls in parallel, partial failures are inevitable. Tool A succeeds, Tool B hits a transient timeout, Tool C returns corrupted data. The system must handle intermediate state: preserving successful results, retrying only the failed paths, and merging everything into a coherent response without duplicating side effects.
+
+### 9.7.1 Idempotent Tool Execution
+
+The foundation of safe retry logic is idempotency -- executing the same tool call multiple times produces the same result without side-effect duplication. Tools that create resources (orders, tickets, emails) must accept a client-generated idempotency key and return the existing result on duplicate requests.
+
+```python
+import hashlib
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class IdempotentTool:
+    """Base class for tools that support safe retries via idempotency keys."""
+
+    _idempotency_store: dict[str, Any] = field(default_factory=dict)
+
+    def _generate_idempotency_key(self, tool_name: str, arguments: dict) -> str:
+        """Deterministic key from tool name + sorted arguments."""
+        canonical = json.dumps(
+            {"tool": tool_name, "args": arguments},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+    def execute_with_idempotency(
+        self, tool_name: str, arguments: dict, execute_fn
+    ) -> dict:
+        key = self._generate_idempotency_key(tool_name, arguments)
+
+        # Return cached result if this exact call already succeeded
+        if key in self._idempotency_store:
+            return self._idempotency_store[key]
+
+        result = execute_fn(arguments)
+
+        # Cache only successful results
+        if result.get("success", False):
+            self._idempotency_store[key] = result
+
+        return result
+```
+
+Tools that wrap external APIs can pass the idempotency key as a request header. Most payment and order APIs support this natively:
+
+```python
+async def create_order(self, items: list, idempotency_key: str) -> dict:
+    response = await self.session.post(
+        "/orders",
+        json={"items": items},
+        headers={"Idempotency-Key": idempotency_key},
+    )
+    response.raise_for_status()
+    return response.json()
+```
+
+### 9.7.2 Partial Result State Management
+
+When parallel calls partially fail, the system must store successful results independently while tracking which calls still need retry. A state manager tracks the lifecycle of each tool call in a batch:
+
+```python
+import asyncio
+import time
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+
+class ToolCallState(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED_RETRYABLE = "failed_retryable"
+    FAILED_PERMANENT = "failed_permanent"
+
+
+@dataclass
+class ToolCallRecord:
+    tool_call_id: str
+    tool_name: str
+    arguments: dict
+    state: ToolCallState = ToolCallState.PENDING
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    attempts: int = 0
+    max_retries: int = 3
+    last_attempt_at: Optional[float] = None
+
+
+class PartialResultStore:
+    """Tracks individual tool call state within a parallel batch."""
+
+    def __init__(self):
+        self._records: dict[str, ToolCallRecord] = {}
+
+    def register(self, record: ToolCallRecord):
+        self._records[record.tool_call_id] = record
+
+    def get_failed_retryable(self) -> list[ToolCallRecord]:
+        return [
+            r
+            for r in self._records.values()
+            if r.state == ToolCallState.FAILED_RETRYABLE
+            and r.attempts < r.max_retries
+        ]
+
+    def get_succeeded(self) -> dict[str, Any]:
+        return {
+            r.tool_call_id: r.result
+            for r in self._records.values()
+            if r.state == ToolCallState.SUCCEEDED
+        }
+
+    def all_resolved(self) -> bool:
+        return all(
+            r.state
+            in (ToolCallState.SUCCEEDED, ToolCallState.FAILED_PERMANENT)
+            for r in self._records.values()
+        )
+
+    def summary(self) -> dict[str, int]:
+        counts = {s: 0 for s in ToolCallState}
+        for r in self._records.values():
+            counts[r.state] += 1
+        return counts
+```
+
+### 9.7.3 Retry Logic with Failed-Path Isolation
+
+The key insight: when parallel calls partially fail, only the failed execution paths should be retried. Successful results are preserved. The model receives context about which specific calls failed so it can reason about whether to retry or adapt.
+
+```python
+class ParallelToolRecoveryManager:
+    """Orchestrates parallel tool execution with partial failure recovery."""
+
+    def __init__(self, tool_executor: Callable, max_retries: int = 3):
+        self.tool_executor = tool_executor
+        self.max_retries = max_retries
+
+    async def execute_parallel(
+        self, tool_calls: list[dict]
+    ) -> dict[str, Any]:
+        store = PartialResultStore()
+
+        # Register all tool calls
+        for call in tool_calls:
+            record = ToolCallRecord(
+                tool_call_id=call["id"],
+                tool_name=call["function"]["name"],
+                arguments=json.loads(call["function"]["arguments"])
+                if isinstance(call["function"]["arguments"], str)
+                else call["function"]["arguments"],
+                max_retries=self.max_retries,
+            )
+            store.register(record)
+
+        # Execute all calls concurrently
+        await self._execute_batch(store)
+
+        # Retry loop for failed calls
+        while not store.all_resolved():
+            failed = store.get_failed_retryable()
+            if not failed:
+                break
+
+            # Wait before retrying (exponential backoff)
+            await asyncio.sleep(2 ** (failed[0].attempts))
+
+            await self._execute_batch(store, only=failed)
+
+        return self._build_response(store)
+
+    async def _execute_batch(
+        self,
+        store: PartialResultStore,
+        only: Optional[list[ToolCallRecord]] = None,
+    ):
+        records = only or [
+            r
+            for r in store._records.values()
+            if r.state in (ToolCallState.PENDING, ToolCallState.FAILED_RETRYABLE)
+        ]
+
+        tasks = []
+        for record in records:
+            record.state = ToolCallState.RUNNING
+            record.attempts += 1
+            record.last_attempt_at = time.time()
+            tasks.append(self._execute_single(record))
+
+        await asyncio.gather(*tasks)
+
+    async def _execute_single(self, record: ToolCallRecord):
+        try:
+            result = await self.tool_executor(
+                record.tool_name, record.arguments
+            )
+            record.state = ToolCallState.SUCCEEDED
+            record.result = result
+        except TimeoutError:
+            record.error = "Timeout after retry"
+            record.state = (
+                ToolCallState.FAILED_RETRYABLE
+                if record.attempts < record.max_retries
+                else ToolCallState.FAILED_PERMANENT
+            )
+        except Exception as e:
+            error_str = str(e)
+            # Classify: retry on transient errors, fail permanent on others
+            if any(
+                kw in error_str.lower()
+                for kw in ["timeout", "rate limit", "502", "503", "504"]
+            ):
+                record.state = (
+                    ToolCallState.FAILED_RETRYABLE
+                    if record.attempts < record.max_retries
+                    else ToolCallState.FAILED_PERMANENT
+                )
+            else:
+                record.state = ToolCallState.FAILED_PERMANENT
+            record.error = error_str
+
+    def _build_response(self, store: PartialResultStore) -> dict[str, Any]:
+        succeeded = store.get_succeeded()
+        summary = store.summary()
+
+        return {
+            "results": succeeded,
+            "partial_success": summary[ToolCallState.SUCCEEDED] > 0
+            and summary[ToolCallState.FAILED_PERMANENT] > 0,
+            "all_succeeded": summary[ToolCallState.FAILED_PERMANENT] == 0,
+            "failed_calls": [
+                {
+                    "tool_call_id": r.tool_call_id,
+                    "tool_name": r.tool_name,
+                    "error": r.error,
+                }
+                for r in store._records.values()
+                if r.state == ToolCallState.FAILED_PERMANENT
+            ],
+            "summary": summary,
+        }
+```
+
+### 9.7.4 Preventing State Duplication and Infinite Loops
+
+Retries without bounds create duplicate side effects and resource waste. Three safeguards are essential:
+
+```python
+class RetryGuard:
+    """Prevents duplicate execution and infinite retry loops."""
+
+    def __init__(
+        self,
+        max_retries_per_tool: int = 3,
+        global_max_retries: int = 10,
+        cooldown_seconds: float = 300,
+    ):
+        self.max_retries_per_tool = max_retries_per_tool
+        self.global_max_retries = global_max_retries
+        self.cooldown_seconds = cooldown_seconds
+        self._execution_counts: dict[str, int] = {}
+        self._global_attempts = 0
+        self._dedup_keys: set[str] = set()
+
+    def can_execute(self, tool_call_id: str, dedup_key: str) -> tuple[bool, str]:
+        # Check global limit
+        self._global_attempts += 1
+        if self._global_attempts > self.global_max_retries:
+            return False, "Global retry limit exceeded"
+
+        # Check per-tool limit
+        count = self._execution_counts.get(tool_call_id, 0)
+        if count >= self.max_retries_per_tool:
+            return False, f"Tool {tool_call_id} exceeded max retries ({count})"
+
+        # Check deduplication
+        if dedup_key in self._dedup_keys:
+            return False, f"Duplicate execution blocked for key {dedup_key}"
+
+        return True, "ok"
+
+    def record_execution(self, tool_call_id: str, dedup_key: str):
+        self._execution_counts[tool_call_id] = (
+            self._execution_counts.get(tool_call_id, 0) + 1
+        )
+        self._dedup_keys.add(dedup_key)
+
+    def reset_cooldown(self):
+        """Reset all state after cooldown period."""
+        self._execution_counts.clear()
+        self._global_attempts = 0
+        self._dedup_keys.clear()
+```
+
+Key principles:
+- **Max retries per tool call**: Each individual tool call retries at most N times (default 3). Once exhausted, it moves to `FAILED_PERMANENT` and is reported to the model.
+- **Global retry budget**: The total number of retries across all tool calls in a session is capped. This prevents a scenario where 10 parallel calls each retry 3 times, generating 30 additional executions.
+- **Deduplication keys**: Before executing, the system checks whether an identical call (same tool + same arguments) has already been made. If so, the retry is blocked.
+
+### 9.7.5 Feeding Failure Context Back to the Model
+
+After retries are exhausted, the model needs enough context to reason about partial results. Include failed tool call IDs, error messages, and the successful partial results in the next prompt:
+
+```python
+def format_partial_failure_response(
+    recovery_result: dict, original_query: str
+) -> list[dict]:
+    """Build a message sequence that gives the model context about partial failures."""
+
+    succeeded = recovery_result["results"]
+    failed = recovery_result["failed_calls"]
+
+    # Format successful partial results
+    success_text = json.dumps(succeeded, indent=2)
+
+    # Format failure details
+    failure_details = []
+    for f in failed:
+        failure_details.append(
+            f"- Tool '{f['tool_name']}' (ID: {f['tool_call_id']}) failed: {f['error']}"
+        )
+    failure_text = "\n".join(failure_details)
+
+    return [
+        {
+            "role": "user",
+            "content": original_query,
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [],  # Original parallel calls
+        },
+        {
+            "role": "tool",
+            "content": success_text,
+            "name": "partial_results",
+            "tool_call_id": "partial_results_summary",
+        },
+        {
+            "role": "tool",
+            "content": failure_text,
+            "name": "failure_report",
+            "tool_call_id": "failure_report",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Some tools succeeded, others failed:\n\n"
+                f"**Successful results:**\n```\n{success_text}\n```\n\n"
+                f"**Failed tools:**\n{failure_text}\n\n"
+                "Please provide the best answer using the available results. "
+                "If critical information is missing due to failures, "
+                "explain what went wrong and what data is available."
+            ),
+        },
+    ]
+```
+
+### 9.7.6 Recovery Patterns
+
+Different failure types require different recovery strategies:
+
+| Failure Type | Symptom | Recovery Strategy | Retry? | Example |
+|---|---|---|---|---|
+| Transient timeout | API responds slowly, then times out | Exponential backoff retry | Yes (up to 3x) | Weather API under load |
+| Rate limiting | 429 Too Many Requests | Wait for Retry-After header, then retry | Yes (respect headers) | Third-party API quota |
+| Permanent failure | 404 Not Found, 400 Bad Request | Do not retry. Report error to model. | No | Invalid order ID |
+| Partial data corruption | Response parsed but fields missing | Retry once, then treat as permanent failure | Yes (1x) | Malformed JSON from API |
+| Network partition | Connection refused, DNS failure | Retry with backoff, fall back to cached data if available | Yes (up to 2x) | Database failover |
+| Authentication failure | 401/403 | Do not retry. Refresh credentials first. | No (after credential refresh) | Expired API token |
+| Idempotent create duplicate | Same order created twice | Idempotency key prevents duplicate. Return existing result. | N/A (handled by idempotency) | User double-clicks submit |
+| Partial success + partial failure | 2 of 3 parallel calls succeed | Return successful results to model, report failures separately | Yes (failed calls only) | One service is down |
+
+### 9.7.7 End-to-End Example
+
+Putting it all together -- a complete parallel tool execution with recovery:
+
+```python
+async def run_with_recovery(agent, user_query: str):
+    """Execute a user query with parallel tool calling and failure recovery."""
+
+    # Initial model response with parallel tool calls
+    response = await agent.model.chat(
+        messages=[{"role": "user", "content": user_query}],
+        tools=agent.tools,
+        parallel_tool_calls=True,
+    )
+
+    if not response.tool_calls:
+        return response.content
+
+    # Execute with recovery
+    recovery = ParallelToolRecoveryManager(
+        tool_executor=agent.execute_tool,
+        max_retries=3,
+    )
+    result = await recovery.execute_parallel(
+        [tc.model_dump() for tc in response.tool_calls]
+    )
+
+    # Check if we need to give the model failure context
+    if result["partial_success"]:
+        followup_messages = format_partial_failure_response(
+            result, user_query
+        )
+        final_response = await agent.model.chat(
+            messages=followup_messages,
+            tools=agent.tools,
+        )
+        return final_response.content
+
+    if result["all_succeeded"]:
+        # Build response from all successful results
+        return await agent.model.chat(
+            messages=[
+                {"role": "user", "content": user_query},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": response.tool_calls,
+                },
+                *[
+                    {
+                        "role": "tool",
+                        "content": json.dumps(r),
+                        "tool_call_id": tc_id,
+                    }
+                    for tc_id, r in result["results"].items()
+                ],
+            ]
+        )
+
+    # All calls failed permanently
+    failure_summary = "\n".join(
+        f"- {f['tool_name']}: {f['error']}" for f in result["failed_calls"]
+    )
+    return (
+        f"I was unable to retrieve the requested information. "
+        f"All tool calls failed:\n{failure_summary}\n"
+        f"Please try again later or rephrase your request."
+    )
+```
+
+This pattern ensures that transient failures in one tool do not block results from other tools, the model receives enough context to handle partial information gracefully, and duplicate side effects are prevented through idempotency and deduplication.
+
+---
+
+## 9.8 Key Takeaways
 
 1. **Tool descriptions are as important as tool implementation -- the model uses descriptions to decide which tool to call.** Invest in clear, specific, action-oriented descriptions. Include examples of when to use each tool. This is the highest-leverage optimization.
 
@@ -1014,7 +1468,7 @@ def test_tool_error_handling(agent):
 
 ---
 
-## 9.8 Further Reading
+## 9.9 Further Reading
 
 - **OpenAI Function Calling Guide** (platform.openai.com/docs/guides/function-calling) -- Official documentation on function calling, tool definitions, and parallel tool calls. Essential for understanding the API contract.
 

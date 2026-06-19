@@ -1061,7 +1061,639 @@ def test_cache_hit():
 
 ---
 
-## 15.8 Key Takeaways
+## 15.7 KV Cache Eviction & Memory Management
+
+Self-hosted LLM serving (vLLM, TGI) requires managing GPU memory for the KV cache — the stored key-value pairs from previous tokens that enable attention computation. At scale, KV cache fragmentation and exhaustion are real production problems.
+
+### 15.7.1 How KV Cache Works
+
+During autoregressive generation, each new token requires attention against all previous tokens. The KV cache stores precomputed key-value pairs to avoid recomputation. For a model with 40 layers, 32 KV heads, and 128-dimensional heads:
+
+```
+KV cache per token = 2 (K and V) × 40 layers × 32 heads × 128 dims × 2 bytes (FP16)
+                   = 655,360 bytes ≈ 0.65 MB per token
+
+At 128K context: 0.65 MB × 128,000 = ~83 GB per request
+At 100 concurrent requests: 83 GB × 100 = 8.3 TB (exceeds GPU memory)
+```
+
+vLLM's PagedAttention solves this by treating KV cache as pages (like virtual memory), storing non-contiguous blocks across GPU memory. But even with PagedAttention, eviction decisions are necessary when memory fills.
+
+### 15.7.2 Eviction Strategies
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+import time
+
+class EvictionStrategy(Enum):
+    LRU = "lru"                      # Least Recently Used
+    LFU = "lfu"                      # Least Frequently Used
+    PRIORITY = "priority"            # Business-value based
+    TOKEN_BUDGET = "token_budget"    # Oldest tokens first (sliding window)
+    IMPORTANCE = "importance"        # Semantic importance score
+
+@dataclass
+class KVCacheEntry:
+    request_id: str
+    session_id: str
+    token_count: int
+    last_accessed: float
+    access_count: int
+    priority: float                  # 0.0-1.0, from business logic
+    importance_scores: list[float]   # Per-token importance
+    created_at: float
+
+class KVCacheManager:
+    """Manage KV cache eviction for multi-tenant LLM serving."""
+
+    def __init__(self, max_cache_gb: float, strategy: EvictionStrategy):
+        self.max_bytes = max_cache_gb * 1024 ** 3
+        self.strategy = strategy
+        self.entries: dict[str, KVCacheEntry] = {}
+        self.current_usage = 0
+
+    def admit(self, entry: KVCacheEntry) -> bool:
+        """Attempt to admit a new entry into the cache."""
+        required_bytes = entry.token_count * 655360  # 0.65 MB per token
+
+        if self.current_usage + required_bytes <= self.max_bytes:
+            self.entries[entry.request_id] = entry
+            self.current_usage += required_bytes
+            return True
+
+        # Need to evict
+        evicted = self._evict(required_bytes)
+        if evicted:
+            self.entries[entry.request_id] = entry
+            self.current_usage += required_bytes
+            return True
+
+        return False
+
+    def _evict(self, required_bytes: int) -> bool:
+        """Evict entries until enough space is freed."""
+        candidates = sorted(
+            self.entries.values(),
+            key=self._eviction_score,
+        )
+
+        freed = 0
+        for entry in candidates:
+            entry_bytes = entry.token_count * 655360
+            del self.entries[entry.request_id]
+            freed += entry_bytes
+            self.current_usage -= entry_bytes
+            if freed >= required_bytes:
+                return True
+        return False
+
+    def _eviction_score(self, entry: KVCacheEntry) -> float:
+        """Lower score = evict first."""
+        if self.strategy == EvictionStrategy.LRU:
+            return entry.last_accessed  # Oldest accessed first
+        elif self.strategy == EvictionStrategy.LFU:
+            return entry.access_count   # Least accessed first
+        elif self.strategy == EvictionStrategy.PRIORITY:
+            return -entry.priority      # Lowest priority first
+        elif self.strategy == EvictionStrategy.TOKEN_BUDGET:
+            return entry.token_count    # Largest cache first
+        elif self.strategy == EvictionStrategy.IMPORTANCE:
+            avg_importance = (
+                sum(entry.importance_scores) / len(entry.importance_scores)
+                if entry.importance_scores else 0.5
+            )
+            return avg_importance       # Lowest importance first
+        return 0
+
+    def get_stats(self) -> dict:
+        return {
+            "total_entries": len(self.entries),
+            "usage_gb": self.current_usage / (1024 ** 3),
+            "max_gb": self.max_bytes / (1024 ** 3),
+            "utilization": self.current_usage / self.max_bytes,
+            "avg_tokens_per_entry": (
+                sum(e.token_count for e in self.entries.values()) / len(self.entries)
+                if self.entries else 0
+            ),
+        }
+```
+
+### 15.7.3 When to Swap vs. Re-Compute
+
+When GPU memory is exhausted, two options exist:
+
+| Strategy | Latency Impact | GPU Utilization | When to Use |
+|----------|---------------|-----------------|-------------|
+| **Swap to CPU** | 2-5x slower (PCIe transfer) | Higher GPU idle time | Long sessions, memory pressure |
+| **Re-compute tokens** | 1.5-3x slower (re-fill cache) | Higher compute, same memory | Short sessions, burst traffic |
+| **PagedAttention** | Minimal overhead | Optimal | Default for vLLM |
+
+```python
+class HybridKVCacheManager:
+    """Swap to CPU memory or re-compute based on access patterns."""
+
+    def __init__(self, gpu_cache, cpu_cache, token_budget: int = 4096):
+        self.gpu = gpu_cache
+        self.cpu = cpu_cache
+        self.recompute_budget = token_budget
+
+    async def get_cached_kv(self, request_id: str, token_position: int):
+        """Retrieve KV cache, swapping from CPU if needed."""
+        # Try GPU first
+        kv = self.gpu.get(request_id, token_position)
+        if kv is not None:
+            return kv
+
+        # Try CPU memory
+        kv = self.cpu.get(request_id, token_position)
+        if kv is not None:
+            # Swap back to GPU (async PCIe transfer)
+            await self.gpu.put(request_id, token_position, kv)
+            return kv
+
+        # Re-compute from token position
+        return None  # Caller triggers re-computation
+
+    def decide_strategy(self, session_length: int, concurrent_sessions: int) -> str:
+        """Choose between swap and re-compute."""
+        if session_length > 10000:
+            # Long sessions: re-computing is expensive
+            return "swap_to_cpu"
+        elif concurrent_sessions > 100:
+            # Many concurrent sessions: GPU memory is scarce
+            return "recompute_short_sessions"
+        else:
+            return "paged_attention"  # Let vLLM handle it
+```
+
+---
+
+## 15.8 Cross-Region State Recovery
+
+When a cloud region hosting your primary LLM cluster fails mid-generation, preserving user session state and avoiding duplicate billing tokens requires deliberate architecture.
+
+### 15.8.1 The Region Failover Problem
+
+During an active streaming session, three state elements must survive region failover:
+
+1. **Context state**: The full prompt history and retrieved documents
+2. **Generation state**: Partial output already streamed to the user
+3. **Billing state**: Tokens already consumed (input + partial output)
+
+Without careful design, a region failover can lose all three, causing duplicate billing, lost context, or UI corruption.
+
+### 15.8.2 Session Replication Architecture
+
+```python
+import asyncio
+import hashlib
+from dataclasses import dataclass
+
+@dataclass
+class SessionCheckpoint:
+    session_id: str
+    user_id: str
+    context: list[dict]          # Full prompt history
+    retrieved_docs: list[dict]   # Retrieved context
+    partial_output: str          # Tokens already generated
+    tokens_consumed: int         # For billing reconciliation
+    checkpoint_version: int
+    region: str
+    timestamp: float
+
+class CrossRegionSessionManager:
+    """Manage session state replication across regions."""
+
+    def __init__(self, primary_region: str, replica_regions: list[str]):
+        self.primary = primary_region
+        self.replicas = replica_regions
+        self.checkpoint_store = {}  # In production: DynamoDB Global Tables
+
+    async def checkpoint_session(self, session: SessionCheckpoint) -> dict:
+        """Replicate session state to replica regions."""
+        checkpoint = {
+            "session_id": session.session_id,
+            "context": session.context,
+            "retrieved_docs": session.retrieved_docs,
+            "partial_output": session.partial_output,
+            "tokens_consumed": session.tokens_consumed,
+            "version": session.checkpoint_version,
+            "timestamp": session.timestamp,
+        }
+
+        # Write to primary
+        self.checkpoint_store[f"{self.primary}:{session.session_id}"] = checkpoint
+
+        # Async replicate to secondaries
+        replicate_tasks = [
+            self._replicate_to_region(region, session.session_id, checkpoint)
+            for region in self.replicas
+        ]
+        results = await asyncio.gather(*replicate_tasks, return_exceptions=True)
+
+        successful_replicas = sum(1 for r in results if not isinstance(r, Exception))
+        return {
+            "primary_written": True,
+            "replicas_written": successful_replicas,
+            "total_replicas": len(self.replicas),
+            "quorum_achieved": successful_replicas >= len(self.replicas) // 2,
+        }
+
+    async def failover(self, failed_region: str, session_id: str) -> SessionCheckpoint:
+        """Recover session from a replica region after primary failure."""
+        for region in self.replicas:
+            if region == failed_region:
+                continue
+            key = f"{region}:{session_id}"
+            if key in self.checkpoint_store:
+                checkpoint = self.checkpoint_store[key]
+                return SessionCheckpoint(
+                    session_id=session_id,
+                    user_id=checkpoint.get("user_id", ""),
+                    context=checkpoint["context"],
+                    retrieved_docs=checkpoint["retrieved_docs"],
+                    partial_output=checkpoint["partial_output"],
+                    tokens_consumed=checkpoint["tokens_consumed"],
+                    checkpoint_version=checkpoint["version"],
+                    region=region,
+                    timestamp=checkpoint["timestamp"],
+                )
+        raise RuntimeError(f"No checkpoint found for session {session_id} in any region")
+
+    async def reconcile_billing(self, checkpoint: SessionCheckpoint,
+                                 new_generation_tokens: int) -> dict:
+        """Avoid double-billing after failover."""
+        # The checkpoint already accounts for tokens_consumed
+        # Only bill for tokens generated after failover
+        return {
+            "session_id": checkpoint.session_id,
+            "pre_failover_tokens": checkpoint.tokens_consumed,
+            "post_failover_tokens": new_generation_tokens,
+            "total_billable_tokens": checkpoint.tokens_consumed + new_generation_tokens,
+            "avoided_double_billing": True,
+        }
+
+    async def _replicate_to_region(self, region: str, session_id: str, data: dict):
+        """Write checkpoint to replica region."""
+        # In production: cross-region DynamoDB Global Table write
+        self.checkpoint_store[f"{region}:{session_id}"] = data
+```
+
+### 15.8.3 Failover State Machine
+
+```python
+class FailoverController:
+    """Orchestrate region failover with minimal user impact."""
+
+    STATES = {
+        "HEALTHY": {"transitions": ["DEGRADED", "FAILOVER"]},
+        "DEGRADED": {"transitions": ["HEALTHY", "FAILOVER"]},
+        "FAILOVER": {"transitions": ["RECOVERY", "HEALTHY"]},
+        "RECOVERY": {"transitions": ["HEALTHY"]},
+    }
+
+    def __init__(self, session_manager: CrossRegionSessionManager):
+        self.state = "HEALTHY"
+        self.session_manager = session_manager
+        self.active_sessions: dict[str, str] = {}  # session_id → current_region
+
+    async def detect_region_failure(self, region: str) -> bool:
+        """Health check: can we reach the region's LLM cluster?"""
+        try:
+            # Attempt a minimal LLM call
+            await self._health_check(region)
+            return False
+        except Exception:
+            return True
+
+    async def handle_region_failure(self, failed_region: str) -> dict:
+        """Execute failover for all active sessions in the failed region."""
+        affected_sessions = [
+            sid for sid, region in self.active_sessions.items()
+            if region == failed_region
+        ]
+
+        results = []
+        for session_id in affected_sessions:
+            try:
+                checkpoint = await self.session_manager.failover(
+                    failed_region, session_id
+                )
+                # Resume from checkpoint in a healthy region
+                healthy_region = self._select_healthy_region()
+                self.active_sessions[session_id] = healthy_region
+
+                results.append({
+                    "session_id": session_id,
+                    "status": "recovered",
+                    "from_region": failed_region,
+                    "to_region": healthy_region,
+                    "tokens_preserved": checkpoint.tokens_consumed,
+                })
+            except Exception as e:
+                results.append({
+                    "session_id": session_id,
+                    "status": "failed",
+                    "error": str(e),
+                })
+
+        return {
+            "affected_sessions": len(affected_sessions),
+            "recovered": sum(1 for r in results if r["status"] == "recovered"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "results": results,
+        }
+
+    def _select_healthy_region(self) -> str:
+        # Round-robin or preference-based
+        return self.session_manager.replicas[0]
+```
+
+---
+
+## 15.9 Cost-Aware Graceful Degradation
+
+During budget overruns or demand spikes, the system should automatically reduce cost per request without failing. The key insight: not all requests need the same reasoning depth.
+
+### 15.9.1 The Degradation Tiers
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+
+class DegradationTier(Enum):
+    FULL = "full"                    # No degradation
+    STANDARD = "standard"            # Reduced context, same model
+    EFFICIENT = "efficient"          # Cheaper model, fewer tools
+    MINIMAL = "minimal"              # Fastest/cheapest response
+    CACHED_ONLY = "cached_only"     # Only serve cached responses
+
+@dataclass
+class CostBudget:
+    daily_limit_usd: float
+    current_spend_usd: float
+    projected_spend_usd: float
+    time_remaining_hours: float
+
+class CostAwareDegradationMiddleware:
+    """Automatically degrade response quality to stay within budget."""
+
+    TIER_CONFIG = {
+        DegradationTier.FULL: {
+            "model": "claude-sonnet-4-20250514",
+            "max_context_tokens": 50000,
+            "enable_tools": True,
+            "enable_chain_of_thought": True,
+            "temperature": 0.7,
+        },
+        DegradationTier.STANDARD: {
+            "model": "claude-sonnet-4-20250514",
+            "max_context_tokens": 20000,
+            "enable_tools": True,
+            "enable_chain_of_thought": True,
+            "temperature": 0.5,
+        },
+        DegradationTier.EFFICIENT: {
+            "model": "gpt-4o-mini",
+            "max_context_tokens": 8000,
+            "enable_tools": False,
+            "enable_chain_of_thought": False,
+            "temperature": 0.3,
+        },
+        DegradationTier.MINIMAL: {
+            "model": "gpt-4o-mini",
+            "max_context_tokens": 2000,
+            "enable_tools": False,
+            "enable_chain_of_thought": False,
+            "temperature": 0.1,
+        },
+        DegradationTier.CACHED_ONLY: {
+            "model": None,  # No LLM call
+            "max_context_tokens": 0,
+            "enable_tools": False,
+            "enable_chain_of_thought": False,
+            "temperature": 0.0,
+        },
+    }
+
+    def __init__(self):
+        self.current_tier = DegradationTier.FULL
+
+    def select_tier(self, budget: CostBudget, query_priority: str = "normal") -> DegradationTier:
+        """Select degradation tier based on budget status."""
+        burn_rate = budget.current_spend_usd / max(
+            24 - budget.time_remaining_hours, 0.1
+        )
+        projected_total = budget.current_spend_usd + (
+            burn_rate * budget.time_remaining_hours
+        )
+
+        # Budget utilization percentage
+        utilization = budget.current_spend_usd / budget.daily_limit_usd
+
+        if utilization < 0.70:
+            return DegradationTier.FULL
+        elif utilization < 0.85:
+            return DegradationTier.STANDARD
+        elif utilization < 0.95:
+            # High-priority queries still get standard tier
+            if query_priority == "high":
+                return DegradationTier.STANDARD
+            return DegradationTier.EFFICIENT
+        elif utilization < 0.99:
+            if query_priority == "high":
+                return DegradationTier.EFFICIENT
+            return DegradationTier.MINIMAL
+        else:
+            return DegradationTier.CACHED_ONLY
+
+    def configure_request(self, tier: DegradationTier, request: dict) -> dict:
+        """Apply tier-specific configuration to a request."""
+        config = self.TIER_CONFIG[tier]
+
+        if config["model"] is None:
+            # CACHED_ONLY: reject or serve from cache only
+            return {**request, "cache_only": True, "reject_reason": "budget_exhausted"}
+
+        return {
+            **request,
+            "model": config["model"],
+            "max_tokens": min(
+                request.get("max_tokens", 1000),
+                config["max_context_tokens"],
+            ),
+            "tools": request.get("tools", []) if config["enable_tools"] else [],
+            "temperature": config["temperature"],
+            "degradation_tier": tier.value,
+        }
+```
+
+### 15.9.2 Business-Value Scoring
+
+Not all queries deserve the same budget allocation. Score queries by business value to prioritize spending:
+
+```python
+class BusinessValueScorer:
+    """Score query business value for cost-aware routing."""
+
+    VALUE_SIGNALS = {
+        "revenue_impact": {
+            "keywords": ["checkout", "payment", "purchase", "refund", "invoice"],
+            "weight": 1.0,
+        },
+        "customer_urgency": {
+            "keywords": ["urgent", "asap", "deadline", "critical", "down"],
+            "weight": 0.8,
+        },
+        "user_tier": {
+            "premium": 0.9,
+            "enterprise": 0.7,
+            "standard": 0.4,
+            "free": 0.1,
+        },
+        "query_complexity": {
+            "complex": 0.8,
+            "moderate": 0.5,
+            "simple": 0.2,
+        },
+    }
+
+    def score(self, query: str, user_tier: str, context: dict) -> float:
+        """Compute business value score (0.0-1.0)."""
+        score = 0.0
+
+        # Revenue impact
+        query_lower = query.lower()
+        if any(kw in query_lower for kw in self.VALUE_SIGNALS["revenue_impact"]["keywords"]):
+            score += self.VALUE_SIGNALS["revenue_impact"]["weight"]
+
+        # Urgency
+        if any(kw in query_lower for kw in self.VALUE_SIGNALS["customer_urgency"]["keywords"]):
+            score += self.VALUE_SIGNALS["customer_urgency"]["weight"]
+
+        # User tier
+        score += self.VALUE_SIGNALS["user_tier"].get(user_tier, 0.3)
+
+        # Complexity (from context)
+        complexity = context.get("complexity", "moderate")
+        score += self.VALUE_SIGNALS["query_complexity"].get(complexity, 0.5)
+
+        return min(score / 3.0, 1.0)  # Normalize to 0-1
+```
+
+---
+
+## 15.10 Semantic Drift Monitoring
+
+Traditional metrics (latency, error rate, cost) miss a critical failure mode: the model's semantic behavior slowly degrades over time without any code change. This happens when upstream models are updated, user behavior shifts, or knowledge bases become stale.
+
+### 15.10.1 Types of Drift
+
+| Drift Type | Cause | Detection Method |
+|------------|-------|-----------------|
+| **Response length drift** | Model update changes verbosity | Track p50/p95 response tokens over time |
+| **Semantic drift** | Model alignment changes | Embedding similarity of outputs to expected |
+| **Hallucination drift** | Knowledge base staleness | Track hallucination rate over time |
+| **Prompt decay** | Model updated, prompt less effective | Track quality scores per prompt version |
+| **Behavioral shift** | User query patterns change | Track query embedding clusters over time |
+
+### 15.10.2 Drift Detection System
+
+```python
+from collections import deque
+import numpy as np
+
+class SemanticDriftMonitor:
+    """Detect semantic drift in model outputs."""
+
+    def __init__(self, window_size: int = 1000, alert_threshold: float = 0.15):
+        self.window_size = window_size
+        self.threshold = alert_threshold
+        self.baseline_metrics: dict[str, float] = {}
+        self.recent_metrics: deque = deque(maxlen=window_size)
+
+    def set_baseline(self, metrics: dict[str, float]):
+        """Set baseline metrics from initial deployment."""
+        self.baseline_metrics = metrics
+
+    def record_request(self, metrics: dict[str, float]):
+        """Record metrics from a single request."""
+        self.recent_metrics.append(metrics)
+
+    def check_drift(self) -> dict:
+        """Check for drift against baseline."""
+        if len(self.recent_metrics) < 100:
+            return {"drift_detected": False, "reason": "insufficient_data"}
+
+        current = self._aggregate_recent()
+        drifts = []
+
+        for metric, baseline_value in self.baseline_metrics.items():
+            if metric not in current:
+                continue
+            current_value = current[metric]
+            if baseline_value == 0:
+                continue
+
+            change = abs(current_value - baseline_value) / baseline_value
+            if change > self.threshold:
+                drifts.append({
+                    "metric": metric,
+                    "baseline": baseline_value,
+                    "current": current_value,
+                    "change_pct": change * 100,
+                    "severity": "high" if change > 2 * self.threshold else "medium",
+                })
+
+        return {
+            "drift_detected": len(drifts) > 0,
+            "drifts": drifts,
+            "current_metrics": current,
+            "recommendation": self._recommend_action(drifts),
+        }
+
+    def _aggregate_recent(self) -> dict[str, float]:
+        """Aggregate recent metrics into a single snapshot."""
+        if not self.recent_metrics:
+            return {}
+
+        keys = self.recent_metrics[0].keys()
+        aggregated = {}
+        for key in keys:
+            values = [m[key] for m in self.recent_metrics if key in m]
+            if values:
+                aggregated[key] = {
+                    "mean": np.mean(values),
+                    "p50": np.percentile(values, 50),
+                    "p95": np.percentile(values, 95),
+                    "std": np.std(values),
+                }
+        return aggregated
+
+    def _recommend_action(self, drifts: list[dict]) -> str:
+        if not drifts:
+            return "no_action"
+        high_severity = [d for d in drifts if d["severity"] == "high"]
+        if high_severity:
+            return "investigate_and_rollback_if_needed"
+        return "monitor_and_alert"
+```
+
+### 15.10.3 Production Monitoring Metrics
+
+| Metric | Baseline Target | Drift Threshold | Action |
+|--------|----------------|-----------------|--------|
+| Avg response tokens | Task-dependent | ±30% from baseline | Investigate model change |
+| Hallucination rate | <5% | +5% absolute | Re-evaluate retrieval pipeline |
+| Quality score (LLM-as-judge) | >0.85 | -10% relative | Review prompt effectiveness |
+| User satisfaction (thumbs up) | >70% | -15% relative | Investigate quality issues |
+| Avg latency (p50) | <2s | +50% from baseline | Check provider status |
+| Cache hit rate | >30% | -20% relative | Query pattern shift |
+
+---
+
+## 15.11 Key Takeaways
 
 1. **Cost monitoring is mandatory—GenAI costs scale linearly and can surprise you.** Track cost per model, per user, per team, and per endpoint. Set budget alerts at 80% and 95% thresholds. The most common surprise is token consumption from long-context applications—a few requests with 100K+ tokens can dominate the daily bill.
 
@@ -1085,7 +1717,7 @@ def test_cache_hit():
 
 ---
 
-## 15.9 Further Reading
+## 15.12 Further Reading
 
 - **OpenTelemetry Documentation** (opentelemetry.io) — Official guide for distributed tracing, metrics, and logging. The standard for observability in production systems.
 

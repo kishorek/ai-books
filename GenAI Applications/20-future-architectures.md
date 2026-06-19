@@ -842,7 +842,455 @@ graph TB
 
 ---
 
-## 20.10 Key Takeaways
+## 20.9 Linear Attention Migration
+
+### 20.9.1 The Quadratic Bottleneck
+
+Standard transformer attention computes pairwise interactions across all tokens: O(N^2) time and memory. This shapes every architectural decision in current GenAI systems — chunking strategies, vector store design, context window limits, retrieval patterns. When context windows were 2K-8K tokens, these constraints were manageable. At 128K-200K, they become expensive. At effectively unlimited context (linear attention or state space models), they become obsolete.
+
+Linear attention mechanisms (Linear Transformers, RWKV, Mamba, Jamba) and state space networks (S4, S5, Hyena) reduce attention complexity to O(N) or O(N log N). Context-window size limits practically disappear. A document that was previously chunked into 50 segments can now be processed in full. The downstream architectural implications are significant.
+
+```
+Quadratic Attention (Current):
+  Context limit → chunking → retrieval → limited context per query
+  Cost: O(N^2) per layer, O(L * N^2) total
+  Practical limit: ~128K tokens before cost degrades
+
+Linear Attention / SSM (Emerging):
+  No context limit → full-document processing → complete context per query
+  Cost: O(N) per layer, O(L * N) total
+  Practical limit: millions of tokens (memory-bound, not compute-bound)
+```
+
+### 20.9.2 Vector Store Strategy Changes
+
+Current RAG systems rely on vector stores because models cannot ingest full documents. Chunked embeddings enable semantic retrieval across large corpora. With linear attention, this assumption inverts.
+
+| Aspect | Quadratic (Current) | Linear (Post-Migration) |
+|--------|---------------------|------------------------|
+| **Primary storage** | Vector store (chunked embeddings) | Full-document index (raw text or tokenized) |
+| **Retrieval trigger** | Always — model cannot see full corpus | On-demand — model sees everything by default |
+| **Embedding model** | Core infrastructure dependency | Optional — used for deduplication, not retrieval |
+| **Index maintenance** | Continuous re-embedding on updates | Incremental token indexing only |
+| **Cost driver** | Embedding compute + vector DB ops | Memory bandwidth for long-context reads |
+
+Migration path: do not rip out vector stores immediately. Vector indexes still serve as fast first-pass filters when the document corpus exceeds available memory. The shift is from "vector store as primary retrieval" to "vector store as memory-tier optimization."
+
+```python
+class HybridRetrieval:
+    """Transitional retrieval: linear attention + vector fallback."""
+    
+    def __init__(self, ssm_index, vector_store, memory_limit=1_000_000):
+        self.ssm_index = ssm_index          # Full-document SSM index
+        self.vector_store = vector_store     # Existing chunk embeddings
+        self.memory_limit = memory_limit     # Tokens that fit in working memory
+    
+    def retrieve(self, query, corpus_size=None):
+        # Small corpus: SSM processes everything directly
+        if corpus_size and corpus_size < self.memory_limit:
+            return self.ssm_index.query(query)
+        
+        # Large corpus: vector store as first-pass filter
+        candidates = self.vector_store.search(query, top_k=50)
+        return self.ssm_index.query(query, documents=candidates)
+```
+
+### 20.9.3 Prompt Design Shifts
+
+The "lost in the middle" problem — where models attend poorly to information placed in the middle of long contexts — is largely an artifact of quadratic attention's positional encoding limitations. Linear attention and SSMs handle positional information differently.
+
+Practical prompt design changes:
+
+1. **No more strategic placement.** Critical information no longer needs to be at the beginning or end of the context. Position within the prompt becomes less sensitive.
+
+2. **Full-document citation.** Instead of "see the paragraph on page 3," models can reference specific locations across the entire document accurately. Prompt instructions can reference "the section about X" without worrying about position.
+
+3. **Reduced prompt compression.** Techniques like prompt condensation, summary chains, and selective context windows become less necessary. The cost of including full context drops from prohibitive to marginal.
+
+4. **Multi-document synthesis.** Prompts can include entire documents for comparison. "Compare the contracts in Appendix A and Appendix B" becomes trivially feasible without retrieval-mediated summarization.
+
+### 20.9.4 Chunking Strategy Evolution
+
+Semantic chunking — splitting documents by meaning rather than fixed token counts — was invented because quadratic attention could not process full documents. With linear attention, chunking becomes an optimization rather than a requirement.
+
+| Chunking Type | Current Need | Post-Migration Need |
+|---------------|-------------|-------------------|
+| **Fixed-size** | Quick and dirty, bad quality | Rarely needed |
+| **Semantic** | Primary strategy, embedding-dependent | Optimization for very large corpora |
+| **Recursive** | Fallback when semantic fails | Still useful for document structure |
+| **Agentic** | High quality, expensive | Preferred for memory-constrained scenarios |
+| **None (full doc)** | Impossible at scale | Default when memory allows |
+
+Production recommendation: retain chunking infrastructure but make it dynamic. Use full-document processing by default; fall back to chunked processing only when document size exceeds working memory.
+
+```python
+def process_document(doc, ssm_engine, max_tokens=500_000):
+    """Dynamic chunking: full doc if possible, chunked if not."""
+    token_count = count_tokens(doc)
+    
+    if token_count <= max_tokens:
+        # Full document — no chunking
+        return ssm_engine.process(doc)
+    
+    # Chunked fallback — semantic splitting
+    chunks = semantic_chunk(doc, max_tokens=max_tokens)
+    results = [ssm_engine.process(chunk) for chunk in chunks]
+    return merge_results(results)
+```
+
+### 20.9.5 Impact on RAG Pipelines
+
+RAG pipelines exist because models cannot see enough context. With linear attention, the pipeline simplifies:
+
+```
+Current RAG Pipeline:
+  Query → Embed query → Vector search → Retrieve top-K chunks
+       → Construct context → Generate answer → Cite sources
+
+Post-Migration Pipeline:
+  Query → Process full document (or filtered subset) → Generate answer → Cite sources
+```
+
+The embedding step, vector search step, and context construction step all shrink or disappear. What remains is the query understanding and answer generation.
+
+However, RAG does not die entirely. Three scenarios still require retrieval:
+
+1. **Corpus exceeds memory.** Billions of documents cannot fit in working memory even with linear attention. Vector store or keyword retrieval remains the first filter.
+
+2. **Real-time data.** Web search, live databases, and streaming data require retrieval regardless of context window size.
+
+3. **Privacy boundaries.** Different documents have different access permissions. Retrieval enforces authorization; full-context processing does not.
+
+### 20.9.6 Migration Decision Framework
+
+| Factor | Stay with Quadratic | Migrate to Linear |
+|--------|-------------------|-------------------|
+| **Document size** | < 50K tokens average | > 100K tokens average |
+| **Cost sensitivity** | Low (cloud GPU budget flexible) | High (cost per query matters) |
+| **Accuracy requirement** | Retrieval quality critical | Full-context synthesis critical |
+| **Existing RAG investment** | Heavy (custom embeddings, fine-tuned retriever) | Light (standard vector store) |
+| **Model availability** | GPT-4, Claude (quadratic) | Mamba, RWKV, Jamba (linear) |
+| **Latency tolerance** | Seconds acceptable | Sub-second required |
+| **Privacy model** | Uniform (all data accessible) | Mixed (some data restricted) |
+
+**Recommended approach**: Phase migration over 6-12 months. Keep quadratic models for production workloads. Prototype linear attention on internal tools and document processing pipelines. Migrate workloads incrementally as linear models demonstrate comparable quality on your domain.
+
+---
+
+## 20.10 Edge-Cloud Hybrid Orchestration
+
+### 20.10.1 The Partitioning Problem
+
+Running every inference request through cloud APIs introduces latency, cost, privacy risk, and availability dependency. Running everything locally requires hardware most users do not have and model sizes that exceed consumer device capabilities. The practical architecture is hybrid: small models (1-3B parameters) run locally via ONNX Runtime or WebGPU, while complex tasks escalate to cloud frontier models.
+
+The challenge is orchestration — deciding what runs where, routing tasks accordingly, and synchronizing state between edge and cloud.
+
+```
+Architecture Overview:
+
+  User Device (Edge)                    Cloud
+  ┌─────────────────────┐    ┌─────────────────────┐
+  │ Small Model (1-3B)  │    │ Frontier Model      │
+  │ ONNX / WebGPU       │    │ GPT-4 / Claude      │
+  │                     │    │                     │
+  │ - Privacy reasoning │    │ - Complex analysis  │
+  │ - Fast responses    │    │ - Multi-step logic  │
+  │ - PII processing    │    │ - Code generation   │
+  │ - Simple Q&A        │    │ - Long-context work │
+  └─────────┬───────────┘    └─────────┬───────────┘
+            │                          │
+            └──────────┬───────────────┘
+                       │
+              ┌────────▼────────┐
+              │  Orchestrator   │
+              │  (Router + Sync)│
+              └─────────────────┘
+```
+
+### 20.10.2 Model Partitioning
+
+Task partitioning between edge and cloud depends on three factors: model capability, latency requirement, and data sensitivity.
+
+| Task Category | Edge (1-3B) | Cloud (Frontier) | Routing Logic |
+|--------------|-------------|-----------------|---------------|
+| **PII extraction** | Primary | Never | Privacy policy: PII never leaves device |
+| **Simple Q&A** | Primary | Fallback | Confidence threshold: if edge confidence < 0.7, escalate |
+| **Document classification** | Primary | Validation | Edge handles 90%, cloud validates edge cases |
+| **Multi-step reasoning** | Escalate | Primary | Task complexity detector: if steps > 3, route to cloud |
+| **Code generation** | Escalate | Primary | Code tasks always to frontier models |
+| **Summarization** | Short docs | Long docs | Token count: edge handles < 4K tokens |
+| **Translation** | Primary | Quality check | Edge for common pairs, cloud for rare languages |
+| **Real-time chat** | Primary | Escalation | Latency requirement: edge for < 200ms responses |
+
+Implementation:
+
+```python
+class ModelPartitioner:
+    """Routes tasks between edge and cloud models."""
+    
+    CONFIDENCE_THRESHOLD = 0.7
+    EDGE_MAX_TOKENS = 4000
+    COMPLEXITY_STEP_LIMIT = 3
+    
+    def __init__(self, edge_model, cloud_client):
+        self.edge_model = edge_model
+        self.cloud_client = cloud_client
+    
+    def route(self, task):
+        # Privacy check: PII always stays on device
+        if task.contains_pii:
+            return self.edge_model.infer(task)
+        
+        # Complexity check: multi-step reasoning to cloud
+        if self._estimate_complexity(task) > self.COMPLEXITY_STEP_LIMIT:
+            return self.cloud_client.infer(task)
+        
+        # Size check: large documents to cloud
+        if task.token_count > self.EDGE_MAX_TOKENS:
+            return self.cloud_client.infer(task)
+        
+        # Default: try edge, escalate on low confidence
+        edge_result = self.edge_model.infer(task)
+        if edge_result.confidence < self.CONFIDENCE_THRESHOLD:
+            return self.cloud_client.infer(task)
+        
+        return edge_result
+    
+    def _estimate_complexity(self, task):
+        # Simple heuristic: count imperative verbs, conditions, references
+        complexity_signals = [
+            task.text.count("then"),
+            task.text.count("if "),
+            task.text.count("and then"),
+            len(task.referenced_documents) - 1,
+        ]
+        return sum(complexity_signals)
+```
+
+### 20.10.3 Privacy-Sensitive Routing
+
+Edge-cloud orchestration must enforce data residency. Certain data cannot leave the device under any circumstance — healthcare records, financial data, personal identifiers. The orchestrator implements policy-based routing that is enforced at the infrastructure layer, not just the application layer.
+
+```python
+class PrivacyRouter:
+    """Enforces data residency policies for edge-cloud routing."""
+    
+    POLICIES = {
+        "pii_never_leave_device": ["ssn", "email", "phone", "address"],
+        "healthcare_device_only": ["diagnosis", "treatment", "medication"],
+        "financial_device_only": ["account_number", "balance", "transaction"],
+    }
+    
+    def __init__(self, device_id):
+        self.device_id = device_id
+        self.audit_log = []
+    
+    def check_route(self, task, destination):
+        """Returns (allowed, reason)."""
+        violations = []
+        
+        for policy_name, data_types in self.POLICIES.items():
+            if self._contains_data_types(task, data_types):
+                if destination == "cloud":
+                    violations.append(f"{policy_name}: {data_types}")
+        
+        if violations:
+            self.audit_log.append({
+                "task_id": task.id,
+                "destination": destination,
+                "blocked": True,
+                "violations": violations,
+            })
+            return False, f"Blocked: {'; '.join(violations)}"
+        
+        return True, "Allowed"
+    
+    def _contains_data_types(self, task, data_types):
+        task_text = task.text.lower()
+        return any(dtype.lower() in task_text for dtype in data_types)
+```
+
+### 20.10.4 Latency Optimization
+
+The primary performance benefit of edge inference is latency. Cloud API calls add 200-2000ms of network round-trip. Local ONNX inference on modern hardware completes in 20-100ms for small models.
+
+```python
+class LatencyOptimizer:
+    """Manages edge-cloud latency trade-offs."""
+    
+    def __init__(self, edge_model, cloud_client, p99_budget_ms=500):
+        self.edge_model = edge_model
+        self.cloud_client = cloud_client
+        self.p99_budget_ms = p99_budget_ms
+        self.cache = LRUCache(maxsize=10000)
+    
+    async def infer(self, task):
+        # Cache check: skip inference entirely
+        cache_key = task.fingerprint()
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        # Edge inference: fast path
+        start = time.monotonic()
+        edge_result = self.edge_model.infer(task)
+        edge_latency_ms = (time.monotonic() - start) * 1000
+        
+        # Fast enough and confident: return edge result
+        if edge_latency_ms < self.p99_budget_ms * 0.5:
+            if edge_result.confidence > 0.8:
+                self.cache[cache_key] = edge_result
+                return edge_result
+        
+        # Edge too slow or not confident: try cloud
+        start = time.monotonic()
+        cloud_result = await self.cloud_client.infer(task)
+        cloud_latency_ms = (time.monotonic() - start) * 1000
+        
+        # Use whichever is faster and available
+        if cloud_latency_ms < self.p99_budget_ms:
+            self.cache[cache_key] = cloud_result
+            return cloud_result
+        
+        # Cloud too slow: return edge result (degraded quality, within budget)
+        self.cache[cache_key] = edge_result
+        return edge_result
+```
+
+### 20.10.5 Sync Protocols
+
+Edge and cloud models must stay synchronized — model updates, cache invalidation, and configuration changes. The sync protocol must handle intermittent connectivity (mobile devices, air-gapped environments) and eventual consistency.
+
+```python
+class EdgeCloudSync:
+    """Synchronizes model state and caches between edge and cloud."""
+    
+    def __init__(self, device_id, cloud_endpoint):
+        self.device_id = device_id
+        self.cloud_endpoint = cloud_endpoint
+        self.local_manifest = self._load_manifest()
+    
+    async def sync(self):
+        """Pull model updates and push local state."""
+        # Pull: cloud → edge
+        cloud_manifest = await self._fetch_manifest()
+        
+        for model_id, cloud_version in cloud_manifest.items():
+            local_version = self.local_manifest.get(model_id)
+            if cloud_version > local_version:
+                await self._pull_model(model_id, cloud_version)
+                self.local_manifest[model_id] = cloud_version
+        
+        # Push: edge → cloud (aggregated usage stats, not raw data)
+        local_stats = self._aggregate_stats()
+        await self._push_stats(local_stats)
+    
+    async def _pull_model(self, model_id, version):
+        """Download model update to local device."""
+        model_path = f"/models/{model_id}/v{version}"
+        # Differential download: only changed layers
+        delta = await self.cloud_endpoint.get_delta(model_id, 
+                    from_version=self.local_manifest.get(model_id, 0),
+                    to_version=version)
+        self._apply_delta(model_id, delta)
+    
+    def _aggregate_stats(self):
+        """Aggregate local usage stats (no PII) for cloud analytics."""
+        return {
+            "device_id": self.device_id,
+            "queries_served": self.stats.query_count,
+            "edge_confidence_avg": self.stats.avg_confidence,
+            "escalation_rate": self.stats.escalation_rate,
+            "p50_latency_ms": self.stats.p50_latency,
+            "p99_latency_ms": self.stats.p99_latency,
+        }
+```
+
+### 20.10.6 EdgeCloudOrchestrator
+
+The complete orchestration layer combining routing, privacy, latency, and sync:
+
+```python
+class EdgeCloudOrchestrator:
+    """Full edge-cloud orchestration for hybrid GenAI applications."""
+    
+    def __init__(self, edge_model, cloud_client, device_id):
+        self.partitioner = ModelPartitioner(edge_model, cloud_client)
+        self.privacy_router = PrivacyRouter(device_id)
+        self.latency_optimizer = LatencyOptimizer(edge_model, cloud_client)
+        self.sync = EdgeCloudSync(device_id, cloud_client.endpoint)
+        self.metrics = OrchestratorMetrics()
+    
+    async def handle_request(self, request):
+        """Route and execute a single inference request."""
+        start = time.monotonic()
+        
+        # Privacy gate: determine allowed destinations
+        allowed_cloud = self.privacy_router.check_route(request, "cloud")[0]
+        allowed_edge = self.privacy_router.check_route(request, "edge")[0]
+        
+        # Route decision
+        if not allowed_cloud:
+            # PII or sensitive data: edge only
+            result = self.partitioner.edge_model.infer(request)
+            self.metrics.record("edge_only", time.monotonic() - start)
+        elif not allowed_edge:
+            # Should not happen, but handle it
+            raise ValueError("Request blocked on all destinations")
+        else:
+            # Both allowed: use latency optimizer
+            result = await self.latency_optimizer.infer(request)
+            self.metrics.record("hybrid", time.monotonic() - start)
+        
+        return result
+    
+    async def sync_models(self):
+        """Background: keep edge models current."""
+        await self.sync.sync()
+    
+    def get_metrics(self):
+        return {
+            "total_requests": self.metrics.total,
+            "edge_served_pct": self.metrics.edge_pct,
+            "cloud_served_pct": self.metrics.cloud_pct,
+            "avg_latency_ms": self.metrics.avg_latency,
+            "privacy_blocks": self.metrics.privacy_blocks,
+        }
+```
+
+### 20.10.7 Task Routing Decision Table
+
+| Input Signal | Edge Route | Cloud Route | Rationale |
+|-------------|-----------|------------|-----------|
+| Contains PII/PHI/PCI | Always | Never | Regulatory compliance |
+| Token count < 2K | Primary | Fallback | Edge handles small context well |
+| Token count > 8K | Escalate | Primary | Edge memory insufficient |
+| Confidence > 0.85 | Primary | Skip | Edge quality sufficient |
+| Confidence 0.5-0.85 | Primary | Validate | Edge draft, cloud verify |
+| Confidence < 0.5 | Skip | Primary | Edge quality insufficient |
+| Latency budget < 200ms | Primary | Skip | Cloud round-trip too slow |
+| Latency budget > 2s | Either | Either | Time allows cloud quality |
+| Multi-step (> 3 steps) | Escalate | Primary | Edge reasoning limited |
+| Code generation | Escalate | Primary | Frontier models far better |
+| Real-time interaction | Primary | Escalation | User experience requires speed |
+| Batch processing | Either | Primary | Latency irrelevant, optimize quality |
+| Offline / no network | Primary | Skip | Cloud unavailable |
+| Model update available | Sync | Push | Eventual consistency |
+
+### 20.10.8 Production Deployment Considerations
+
+1. **Model size calibration.** Benchmark 1B, 2B, and 3B models on your actual edge hardware (iPhone, Android flagship, laptop). The "3B" label does not guarantee performance — architecture matters more than parameter count for edge deployment.
+
+2. **ONNX optimization.** Quantize models to INT8 or INT4 for edge deployment. ONNX Runtime with CoreML (iOS) or NNAPI (Android) provides hardware acceleration. Profile inference time on target devices before committing to a partitioning strategy.
+
+3. **Graceful degradation.** When cloud is unreachable, the edge model must serve requests without hanging. Design the orchestrator to fail fast on cloud timeout and fall back to edge-only mode with reduced quality.
+
+4. **A/B testing.** Run parallel edge and cloud inference for a sample of requests. Compare quality metrics (accuracy, coherence, helpfulness) to validate that the partitioning strategy produces acceptable quality at each tier.
+
+5. **Cost tracking.** Edge inference has zero marginal API cost but higher device battery consumption. Cloud inference has direct API cost but zero device impact. Track both cost axes to optimize the routing thresholds.
+
+---
+
+## 20.11 Key Takeaways
 
 1. **Reasoning models are the biggest near-term improvement.** They solve complex tasks that standard models cannot — math, planning, multi-step analysis. The trajectory is toward universal reasoning: all models will allocate compute based on task complexity.
 
@@ -866,7 +1314,7 @@ graph TB
 
 ---
 
-## 20.11 Further Reading
+## 20.12 Further Reading
 
 - **"Superintelligence" by Nick Bostrom** — Chapter 4 (Orthogonality Thesis) and Chapter 8 (Convergent Instrumental Goals) provide the theoretical foundation for understanding agent behavior and alignment.
 
