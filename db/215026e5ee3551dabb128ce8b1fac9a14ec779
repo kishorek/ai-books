@@ -1,0 +1,37 @@
+css/style.css
+  s_93c4434b305590::t_e76523f3f79066 621-763
+  s_dfdceefcd1d1de::t_5a4e5ecc207b4a 338-343
+  s_93c4434b305590::t_cd6a21df558f76 363-381
+book.html
+  s_93c4434b305590::t_222b227c0f21f4 46-59
+  s_93c4434b305590::t_8b515e63906584 33
+js/app.js
+  s_93c4434b305590::t_4a1a97f0ffb231 87
+  s_93c4434b305590::t_b1f13d1779fa5c 383-384
+  s_93c4434b305590::t_a504a74510c098 83-86
+  s_93c4434b305590::t_68254bb2d0524d 283-382,385-411
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "db215026e5ee3551dabb128ce8b1fac9a14ec779",
+  "prompts": {},
+  "sessions": {
+    "s_93c4434b305590": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1220cb143ffeGEUiw6vBqAhgmA",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    },
+    "s_dfdceefcd1d1de": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_12208ea91ffenTQPQMRuEe8LAG",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "Kishore Kumar Uthirapathy <libcomet@gmail.com>"
+    }
+  }
+}
