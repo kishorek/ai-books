@@ -80,6 +80,11 @@ const breadcrumb = document.getElementById('breadcrumb');
 const article = document.getElementById('article');
 const loading = document.getElementById('loading');
 const themeToggle = document.getElementById('theme-toggle');
+const searchOverlay = document.getElementById('search-overlay');
+const searchModal = document.getElementById('search-modal');
+const searchInput = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+const searchBtn = document.getElementById('search-btn');
 
 let currentBook = null;
 let currentChapter = null;
@@ -274,6 +279,135 @@ function handleHash() {
 }
 
 window.addEventListener('hashchange', handleHash);
+
+// ===== SEARCH =====
+const chapterCache = {};
+let searchDebounce = null;
+
+async function fetchChapterContent(bookKey, file) {
+  const cacheKey = `${bookKey}/${file}`;
+  if (chapterCache[cacheKey]) return chapterCache[cacheKey];
+
+  try {
+    const encodedPath = encodeURIComponent(file);
+    const resp = await fetch(`${bookKey}/${encodedPath}`);
+    if (!resp.ok) return null;
+    const md = await resp.text();
+    chapterCache[cacheKey] = md;
+    return md;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheAllChapters(bookKey) {
+  const book = BOOKS[bookKey];
+  if (!book) return;
+  await Promise.all(book.chapters.map(ch => fetchChapterContent(bookKey, ch.file)));
+}
+
+function searchChapters(query) {
+  if (!currentBook || !query.trim()) return [];
+
+  const book = BOOKS[currentBook];
+  const q = query.toLowerCase();
+  const results = [];
+
+  for (const ch of book.chapters) {
+    const cacheKey = `${currentBook}/${ch.file}`;
+    const content = chapterCache[cacheKey] || '';
+    const lowerContent = content.toLowerCase();
+    const titleMatch = ch.title.toLowerCase().includes(q);
+
+    if (titleMatch) {
+      results.push({ chapter: ch, snippet: ch.title, matchType: 'title' });
+      continue;
+    }
+
+    let pos = lowerContent.indexOf(q);
+    if (pos === -1) continue;
+
+    const start = Math.max(0, pos - 40);
+    const end = Math.min(content.length, pos + query.length + 60);
+    let snippet = content.slice(start, end).replace(/\n/g, ' ').trim();
+    if (start > 0) snippet = '...' + snippet;
+    if (end < content.length) snippet = snippet + '...';
+
+    results.push({ chapter: ch, snippet, matchType: 'content' });
+  }
+
+  return results;
+}
+
+function highlightText(text, query) {
+  if (!query) return text;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(`(${escaped})`, 'gi'), '<mark>$1</mark>');
+}
+
+function renderSearchResults(results, query) {
+  if (results.length === 0) {
+    searchResults.innerHTML = `<div class="search-no-results">No results for "${query}"</div>`;
+    return;
+  }
+
+  searchResults.innerHTML = results.map((r, i) => `
+    <a class="search-result${i === 0 ? ' active' : ''}" data-chapter="${r.chapter.file.replace('.md', '')}" href="#${currentBook}/${r.chapter.file.replace('.md', '')}">
+      <div class="search-result-chapter">${r.chapter.title}</div>
+      <div class="search-result-text">${highlightText(r.snippet, query)}</div>
+    </a>
+  `).join('');
+
+  searchResults.querySelectorAll('.search-result').forEach(el => {
+    el.addEventListener('click', closeSearch);
+  });
+}
+
+function openSearch() {
+  searchOverlay.classList.add('active');
+  searchInput.value = '';
+  searchResults.innerHTML = '<div class="search-empty">Type to search across all chapters</div>';
+  setTimeout(() => searchInput.focus(), 50);
+  cacheAllChapters(currentBook);
+}
+
+function closeSearch() {
+  searchOverlay.classList.remove('active');
+  searchInput.value = '';
+}
+
+searchOverlay?.addEventListener('click', (e) => {
+  if (e.target === searchOverlay) closeSearch();
+});
+
+searchBtn?.addEventListener('click', openSearch);
+
+searchInput?.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    const query = searchInput.value;
+    if (!query.trim()) {
+      searchResults.innerHTML = '<div class="search-empty">Type to search across all chapters</div>';
+      return;
+    }
+    const results = searchChapters(query);
+    renderSearchResults(results, query);
+  }, 150);
+});
+
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    if (searchOverlay.classList.contains('active')) {
+      closeSearch();
+    } else {
+      openSearch();
+    }
+  }
+  if (e.key === 'Escape' && searchOverlay.classList.contains('active')) {
+    closeSearch();
+  }
+});
 
 // Init
 initTheme();

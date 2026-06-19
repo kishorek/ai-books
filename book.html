@@ -30,6 +30,7 @@
         <button class="menu-btn" id="menu-btn">&#9776;</button>
         <div class="breadcrumb" id="breadcrumb"></div>
         <div class="content-actions">
+          <button class="search-btn" id="search-btn" title="Search (Ctrl+K)">&#8981;</button>
           <button class="theme-toggle" id="theme-toggle" title="Toggle dark mode">&#9790;</button>
         </div>
       </div>
@@ -40,6 +41,20 @@
         </div>
       </article>
     </main>
+  </div>
+
+  <!-- Search Modal -->
+  <div class="search-overlay" id="search-overlay">
+    <div class="search-modal" id="search-modal">
+      <div class="search-input-wrap">
+        <span class="search-icon">&#8981;</span>
+        <input type="text" class="search-input" id="search-input" placeholder="Search chapters... (Ctrl+K)" autocomplete="off">
+        <kbd class="search-kbd">Esc</kbd>
+      </div>
+      <div class="search-results" id="search-results">
+        <div class="search-empty">Type to search across all chapters</div>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
